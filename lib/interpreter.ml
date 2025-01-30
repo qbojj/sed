@@ -1,5 +1,6 @@
 open Command
 
+
 type 'a operation =
 | ReadLine of (string option -> 'a operation)
 | WriteString of string * (unit -> 'a operation)
@@ -7,24 +8,15 @@ type 'a operation =
 | ReadFile of string * (string Seq.t -> 'a operation)
 | WriteFile of string * string Seq.t * (unit -> 'a operation)
 
-module OperationMonad : sig
-  type 'a t
-  val return : 'a -> 'a t
-  val bind : 'a t -> ('a -> 'b t) -> 'b t
-  val (>>=) : 'a t -> ('a -> 'b t) -> 'b t
-  val read_line : string option t
-  val write_string : string -> unit t
-  val read_file : string -> string Seq.t t
-  val write_file : string -> string Seq.t -> unit t
-end = struct
+module OperationMonad = struct
   type 'a t = 'a operation
   let return x = Done x
-  let rec (>>=) m f = match m with
+  let rec (>>=) m f = (match m with
     | ReadLine k -> ReadLine (fun s -> k s >>= f)
     | WriteString (s, k) -> WriteString (s, fun () -> k () >>= f)
     | Done x -> f x
     | ReadFile (file, k) -> ReadFile (file, fun s -> k s >>= f)
-    | WriteFile (file, s, k) -> WriteFile (file, s, fun () -> k () >>= f)
+    | WriteFile (file, s, k) -> WriteFile (file, s, fun () -> k () >>= f))
   let bind = (>>=)
   let read_line = ReadLine (fun x -> Done x)
   let write_string s = WriteString (s, fun () -> Done ())
@@ -41,7 +33,7 @@ type interpreter_state = {
 }
 
 let run (commands: command list): int operation =
-  let state = ref {
+  let state = {
     pattern_space="";
     hold_space="";
     line_number=0;
