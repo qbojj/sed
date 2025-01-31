@@ -140,7 +140,7 @@ let parseCharSet (pos: position) (code: (position * echar) list): ((position * e
       | (_, Unescaped ']') :: rest -> return (true, CSet.singleton ']', rest)
       | _ -> return (true, CSet.empty, rest)
       end
-    | _ -> return (false, CSet.empty,rest) in
+    | _ -> return (false, CSet.empty, first :: rest) in
   let rec find_end acc = function
     | [] -> err pos "unterminated charset"
     | (pos, Escaped c) :: rest -> find_end acc ((pos, Unescaped '\\') :: (pos, Unescaped c) :: rest)
@@ -150,7 +150,6 @@ let parseCharSet (pos: position) (code: (position * echar) list): ((position * e
   (* parse chars (with '-' support) *)
   let rec impl acc = function
     | [] -> return (RLit (fun c -> (CSet.mem c acc) <> negated))
-    | (_, '-') :: rest -> impl (CSet.add '-' acc) rest
     | (_, c1) :: (pos, '-') :: (_, c2) :: rest ->
       let c1 = Char.code c1 in
       let c2 = Char.code c2 in
@@ -160,7 +159,8 @@ let parseCharSet (pos: position) (code: (position * echar) list): ((position * e
           if c1 > c2 then acc
           else add_range (CSet.add (Char.chr c1) acc) (c1 + 1) c2 in
         impl (add_range acc c1 c2) rest
-    | (_, c) :: rest -> impl (CSet.add c acc) rest in
+    | (_, c) :: rest ->
+      impl (CSet.add c acc) rest in
   let* reg = impl content chars in
   return (rest, reg)
 
@@ -173,15 +173,23 @@ let parseRegex (code: pos_str) (endc: char): (pos_str * regex) result =
     | (pos, c) :: rest -> impl pos ((pos, Unescaped c) :: reg_str) rest in
   let* (after_regex, reg_str) = impl { row=(-1); column=(-1) } [] code in
   let position = code |> List.hd |> fst in
+  let get_idx =
+    let idx = ref 1 in
+    fun () -> let v = !idx in idx := v + 1; v
+  in
   let rec impl acc depth = function
     | [] as rest when depth = 0 -> return (rest, RList (List.rev acc))
     | (_, Unescaped ')') :: rest when depth > 0 -> return (rest, RList (List.rev acc))
     | [] -> err position "unterminated group"
     | (pos, Unescaped ')') :: _ -> err pos "unmatched )"
     | (_, Escaped c) :: rest -> impl (RLit ((=) c) :: acc) depth rest
-    | (_, Unescaped '(') :: rest ->
-      let* (rest, reg) = impl [] (depth + 1) rest in
+    | (_, Unescaped '(') :: (_, Unescaped '?') :: (_, Unescaped ':') :: rest ->
+      let* (rest, reg) = impl [] depth rest in
       impl (reg :: acc) depth rest
+    | (_, Unescaped '(') :: rest ->
+      let idx = get_idx () in
+      let* (rest, reg) = impl [] (depth + 1) rest in
+      impl (RGroup (reg, idx) :: acc) depth rest
     | (_, Unescaped '|') :: rest ->
       let* (rest, reg) = impl [] depth rest in
       return (rest, ROr (RList (List.rev acc), reg))
@@ -204,7 +212,7 @@ let parseRegex (code: pos_str) (endc: char): (pos_str * regex) result =
 let parseToString code endc =
   let rec impl pos acc = function
     | [] -> err pos "the to-string is not terminated"
-    | (_, '\\') :: (pos, c) :: rest -> impl pos (c :: acc) rest
+    | (_, '\\') :: (pos, c) :: rest -> impl pos (c :: '\\' :: acc) rest
     | (_, c) :: rest when c = endc -> return (rest, List.rev acc)
     | (pos, c) :: rest -> impl pos (c :: acc) rest in
   let* (rest, r) = impl {row=(-1); column=(-1)} [] code in
@@ -248,10 +256,11 @@ let parseNeg (code: pos_str): (pos_str * bool) result =
 
 let parseAddresses (code: pos_str): (pos_str * address_range) result =
   let* (rest, ad1) = parseAddress code in
+  let rest = skipWhites rest in
   match ad1 with
   | None -> return (rest, Always)
   | Some ad1 ->
-    match code with
+    match rest with
     | [] -> return (rest, Single (ad1, false))
     | (_, ',') :: rest ->
       let* (rest, ad2) = parseAddress rest in

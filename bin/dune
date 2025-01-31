@@ -1,4 +1,4 @@
 (executable
- (public_name sed)
  (name main)
- (libraries sed))
+ (public_name sed)
+ (libraries sed cmdliner unix))

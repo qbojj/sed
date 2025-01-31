@@ -60,7 +60,7 @@ let compile (commands: command list): (compiled_program, string) Result.t =
   let compile_address: address -> c_address = function
     | Line n -> Line n
     | Steps (n, m) -> Steps (n, m)
-    | Command.Regex r -> Regex (Regex.compile r)
+    | Command.Regex r -> Regex (Regex.compile {supports_groups=false; case_insensitive=false} r)
     | Last -> Last in
   let compile_address_opt: (address * bool) option -> (c_address_range * bool) = function
     | None -> Always, false
@@ -70,11 +70,9 @@ let compile (commands: command list): (compiled_program, string) Result.t =
     | Single (a, neg) -> Single (compile_address a), neg
     | Range (start, end_, neg) -> Range { start = compile_address start; end_ = compile_address end_; }, neg in
   let compile_replace_info ({ src; dst; flags }: replace_info): c_replace_info =
-    let src =
-      if List.mem CaseInsensitive flags then
-        Regex.compile_insensitive src
-      else
-        Regex.compile src in
+    let case_insensitive = List.mem CaseInsensitive flags in
+    let group_usage_free = List.for_all (function Group _ -> false | _ -> true) dst in
+    let src = Regex.compile { case_insensitive; supports_groups = not group_usage_free } src in
     let multimatch = List.mem MultiMatch flags in
     { src; dst; multimatch } in
 
@@ -243,7 +241,7 @@ let e_cmd_is_active st =
   | Single a -> st, match_address false a <> cmd.neg
   | Range { start; end_ } ->
     if cmd.is_active then
-      (if match_address true end_ then st else update_active st { cmd with is_active=false }), true <> cmd.neg
+      (if match_address true end_ then update_active st { cmd with is_active=false } else st), true <> cmd.neg
     else
       if match_address false start
       then update_active st { cmd with is_active = true }, true <> cmd.neg
@@ -291,11 +289,15 @@ let run ({ autoprint; line_wrap }: config) (prog: compiled_program) (input: stri
       run' { st with zipper } ()
   
   and new_cycle autoprint st =
-    let pattern = st.pattern in
-    match get_line st with
-    | Some line, st -> new_cycle_with autoprint pattern { st with pattern=line }
-    | None, _ -> if autoprint then Seq.return pattern () else Seq.Nil
-  
+    let impl () =
+      match get_line st with
+      | Some line, st -> new_cycle_with false "" { st with pattern=line }
+      | None, _ -> Seq.Nil in
+    if autoprint then
+      Seq.Cons (st.pattern, impl)
+    else
+      impl ()
+    
   and run' (st: state): string Seq.t = fun () ->
     if is_empty st then new_cycle autoprint st
     else
@@ -318,10 +320,14 @@ let run ({ autoprint; line_wrap }: config) (prog: compiled_program) (input: stri
           Seq.Nil
         | AppendFile s ->
           let file = open_in s in
-          run' { nst with pattern = pattern ^ input_line file } ()
+          let pattern = pattern ^ "\n" ^ input_line file in
+          close_in file;
+          run' { nst with pattern } ()
         | ReplaceText s ->
           let file = open_in s in
-          run' { nst with pattern = input_line file } ()
+          let pattern = input_line file in
+          close_in file;
+          run' { nst with pattern } ()
         | Delete ->
           new_cycle false nst
         | DeleteLine ->
@@ -369,9 +375,9 @@ let run ({ autoprint; line_wrap }: config) (prog: compiled_program) (input: stri
         | CondJmp n ->
           if st.condjmp then run' { nst with zipper = zmove st.zipper n; condjmp=false } ()
           else run' nst () in
-  let input = Seq.memoize input in
-  let prog: e_cmd list = List.map (fun ({ cmd; range; neg }: c_cmd)  -> { cmd; range; neg; is_active=false }) prog in
   fun () ->
+    let input = Seq.memoize input in
+    let prog: e_cmd list = List.map (fun ({ cmd; range; neg }: c_cmd)  -> { cmd; range; neg; is_active=false }) prog in
     match input () with
     | Seq.Nil -> Seq.Nil
     | Seq.Cons (hd, tl) ->
