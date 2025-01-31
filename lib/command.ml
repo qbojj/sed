@@ -7,10 +7,10 @@ type address =
   | Regex of regex
   | Last
 
-type address_range = 
+type address_range =
   | Always
-  | Single of address
-  | Range of address * address
+  | Single of address * bool
+  | Range of address * address * bool
 
 type replace_flags =
   | CaseInsensitive
@@ -21,15 +21,16 @@ type replace_info =
 
 type command =
   | Label of string
-  | PrintLineNo of address option
-  | Append of address option * string
-  | Insert of address option * string
-  | QuitAutoprint of address option
-  | Quit of address option
-  | AppendFile of address option * string
+  | PrintLineNo of (address * bool) option
+  | Append of (address * bool) option * string
+  | Insert of (address * bool) option * string
+  | QuitAutoprint of (address * bool) option
+  | Quit of (address * bool) option
+  | AppendFile of (address * bool) option * string
   | Block of address_range * command list
   | Branch of address_range * string
   | ReplaceText of address_range * string
+  | PrintEscaped of address_range
   | Delete of address_range
   | DeleteLine of address_range
   | CopyToHold of address_range
@@ -54,12 +55,13 @@ type non_blockmatched_command =
   | BeginBlock of address_range * position
   | EndBlock of position
   | Label of string
-  | PrintLineNo of address option
-  | Append of address option * string
-  | Insert of address option * string
-  | QuitAutoprint of address option
-  | Quit of address option
-  | AppendFile of address option * string
+  | PrintLineNo of (address * bool) option
+  | Append of (address * bool) option * string
+  | Insert of (address * bool) option * string
+  | QuitAutoprint of (address * bool) option
+  | Quit of (address * bool) option
+  | AppendFile of (address * bool) option * string
+  | PrintEscaped of address_range
   | Branch of address_range * string
   | ReplaceText of address_range * string
   | Delete of address_range
@@ -248,20 +250,30 @@ let parseAddress (code: pos_str): (pos_str * address option) result =
     end
   | _ -> return (code, None)
 
+let parseNeg (code: pos_str): (pos_str * bool) result =
+  let code = skipWhites code in
+  match code with
+  | (_, '!') :: rest -> return (rest, true)
+  | _ -> return (code, false)
+
 let parseAddresses (code: pos_str): (pos_str * address_range) result =
   let* (rest, ad1) = parseAddress code in
   match ad1 with
   | None -> return (rest, Always)
-  | Some ad1 -> 
+  | Some ad1 ->
     match code with
-    | [] -> return (rest, Single ad1)
+    | [] -> return (rest, Single (ad1, false))
     | (_, ',') :: rest ->
       let* (rest, ad2) = parseAddress rest in
       begin match ad2 with
       | None -> err (List.hd rest |> fst) "invalid address"
-      | Some ad2 -> return (rest, Range (ad1, ad2))
+      | Some ad2 ->
+        let* (rest, neg) = parseNeg rest in
+        return (rest, Range (ad1, ad2, neg))
       end
-    | _ -> return (rest, Single ad1)
+    | _ -> 
+      let* (rest, neg) = parseNeg rest in
+      return (rest, Single (ad1, neg))
 
 let parseToEnd code =
   let rec impl acc = function
@@ -278,7 +290,7 @@ let parseLineCommand (code: pos_str): (pos_str * non_blockmatched_command option
   let simple_addr pos =
     match addr with
     | Always -> return @@ None
-    | Single v -> return @@ Some v
+    | Single (v, neg) -> return @@ Some (v, neg)
     | _ -> err pos "invalid address" in
   let code = skipWhites code in
   match code with
@@ -299,9 +311,11 @@ let parseLineCommand (code: pos_str): (pos_str * non_blockmatched_command option
     let* (rest, text) = parseToEnd rest in
     return (rest, Some (ReplaceText (addr, toString text)))
   | (pos, 'q') :: rest ->
+    let* (rest, _) = parseToEnd rest in
     let* simple = simple_addr pos in
     return (rest, Some (QuitAutoprint simple))
   | (pos, 'Q') :: rest ->
+    let* (rest, _) = parseToEnd rest in
     let* simple = simple_addr pos in
     return (rest, Some (Quit simple))
   | (pos, 'r') :: rest ->
@@ -313,6 +327,7 @@ let parseLineCommand (code: pos_str): (pos_str * non_blockmatched_command option
   | (pos, '}') :: rest ->
     return (rest, Some (EndBlock pos))
   | (pos, '=') :: rest ->
+    let* (rest, _) = parseToEnd rest in
     let* simple = simple_addr pos in
     return (rest, Some (PrintLineNo simple))
   | (_, 'b') :: rest ->
@@ -321,6 +336,9 @@ let parseLineCommand (code: pos_str): (pos_str * non_blockmatched_command option
   | (_, 't') :: rest ->
     let* (rest, name) = parseToEnd rest in
     return (rest, Some (CondJmp (addr, toString name)))
+  | (_, 'l') :: rest ->
+    let* (rest, _) = parseToEnd rest in
+    return (rest, Some (PrintEscaped addr))
   | (pos, 's') :: rest ->
     let rest = skipWhites rest in
     let* (sep, rest) = match rest with | [] -> err pos "no separator" | (_, c) :: rest -> return (c, rest) in
@@ -355,9 +373,6 @@ let parseLineCommand (code: pos_str): (pos_str * non_blockmatched_command option
   | (_, 'G') :: rest ->
     let* (rest, _) = parseToEnd rest in
     return (rest, Some (AppendFromHold addr))
-  | (_, 'l') :: rest ->
-    let* (rest, _) = parseToEnd rest in
-    return (rest, Some (Print addr))
   | (_, 'n') :: rest ->
     let* (rest, _) = parseToEnd rest in
     return (rest, Some (Next addr))
@@ -381,12 +396,13 @@ let parseLineCommand (code: pos_str): (pos_str * non_blockmatched_command option
     let* (rest, sep) = match rest with | [] -> err pos "no separator" | (_, c) :: rest -> return (rest, c) in
     let* (rest, src) = parseToString rest sep in
     let* (rest, dst) = parseToString rest sep in
+    let* (rest, _) = parseToEnd rest in
     if String.length src <> String.length dst then err pos "transliterate strings must have the same length"
     else
       let pairs = List.init (String.length src) (fun i -> (src.[i], dst.[i])) in
       return (rest, Some (Transliterate (addr, pairs)))
   | (pos, c) :: _ ->
-    err pos ("invalid command " ^ String.make 1 c) 
+    err pos ("invalid command " ^ String.make 1 c)
 
 
 let parseLineCommands code =
@@ -444,6 +460,7 @@ let matchBlocks (xs: non_blockmatched_command list): command list result =
     | (CondJmp (addr, x)) :: rest -> matchBlock depth pos (CondJmp (addr, x) :: acc) rest
     | (Write (addr, x)) :: rest -> matchBlock depth pos (Write (addr, x) :: acc) rest
     | (ExchangeHold addr) :: rest -> matchBlock depth pos (ExchangeHold addr :: acc) rest
+    | (PrintEscaped addr) :: rest -> matchBlock depth pos (PrintEscaped addr :: acc) rest
     | (Transliterate (addr, x)) :: rest -> matchBlock depth pos (Transliterate (addr, x) :: acc) rest in
   let* (cmds, _) = matchBlock 0 {row=(-1); column=(-1)} [] xs in
   return cmds

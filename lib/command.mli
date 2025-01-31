@@ -8,8 +8,8 @@ type address =
 
 type address_range = 
   | Always
-  | Single of address
-  | Range of address * address
+  | Single of address * bool
+  | Range of address * address * bool
 
 type replace_flags =
   | CaseInsensitive
@@ -20,15 +20,16 @@ type replace_info =
 
 type command =
   | Label of string
-  | PrintLineNo of address option
-  | Append of address option * string
-  | Insert of address option * string
-  | QuitAutoprint of address option
-  | Quit of address option
-  | AppendFile of address option * string
+  | PrintLineNo of (address * bool) option
+  | Append of (address * bool) option * string
+  | Insert of (address * bool) option * string
+  | QuitAutoprint of (address * bool) option
+  | Quit of (address * bool) option
+  | AppendFile of (address * bool) option * string
   | Block of address_range * command list
   | Branch of address_range * string
   | ReplaceText of address_range * string
+  | PrintEscaped of address_range
   | Delete of address_range
   | DeleteLine of address_range
   | CopyToHold of address_range

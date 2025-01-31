@@ -1,10 +1,11 @@
 open Command
 
-module Make
-  (FileReader : sig val read_file : string -> string end)
-  (FileWriter : sig val write_file : string -> string -> unit end) : sig
-  open FileReader
-  open FileWriter
+type compiled_program
 
-  val run : command list -> string Seq.t -> string Seq.t
-end
+type config = {
+  autoprint: bool;
+  line_wrap: int;
+}
+
+val compile : command list -> (compiled_program, string) Result.t
+val run : config -> compiled_program -> string Seq.t -> string Seq.t

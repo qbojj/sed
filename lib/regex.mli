@@ -9,8 +9,8 @@ type regex =
 
 type regex_replacement = string
 
-type compiled_regex = regex
-type match_info = int * int
+type compiled_regex
+type match_info
 
 val compile : regex -> compiled_regex
 val compile_insensitive : regex -> compiled_regex
