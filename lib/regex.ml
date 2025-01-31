@@ -7,10 +7,45 @@ type regex =
   | ROr of regex * regex
   | RList of regex list
 
-type regex_replacement = string
+type regex_replacement_item =
+| Lit of string
+| WholeMatch
+| Group of int
+
+type regex_replacement = regex_replacement_item list
+
+(* 
+unescaped & -> WholeMatch
+unescaped \num -> Gruop num
+any other -> Lit
+*)
+let parse_replacement (str: string): regex_replacement =
+  let len = String.length str in
+  let rec impl acc i =
+    if i = len then acc
+    else
+      match str.[i] with
+      | '&' -> impl (WholeMatch :: acc) (i + 1)
+      | '\\' when i < len - 1 ->
+        let c = str.[i + 1] in
+        if c >= '0' && c <= '9' then impl (Group (Char.code c - Char.code '0') :: acc) (i + 2)
+        else impl (Lit (String.make 1 '\\') :: Lit (String.make 1 c) :: acc) (i + 2)
+      | c -> impl (Lit (String.make 1 c) :: acc) (i + 1) in
+  impl [] 0
+  (* coalesce literals *)
+  |> List.fold_left (fun acc x ->
+    match x, acc with
+    | Lit s, Lit s' :: rest -> Lit (s ^ s') :: rest
+    | _ -> x :: acc
+  ) []
+  
+module GMap = Map.Make(Int)
 
 type compiled_regex = regex
-type match_info = int * int
+type match_info = {
+  whole: int * int;
+  groups: (int * int) GMap.t;
+}
 
 let compile (r: regex): compiled_regex = r
 let rec compile_insensitive = function
@@ -22,10 +57,19 @@ let rec compile_insensitive = function
   | RList rl -> RList (List.map compile_insensitive rl)
   | ROr (r1, r2) -> ROr (compile_insensitive r1, compile_insensitive r2)
 
-let replace_all rep s matches =
+let replace_all (rep: regex_replacement) (s: string) (matches: match_info Seq.t): string =
   (* matches are non intersecting and in ascending order *)
-  Seq.fold_left (fun (res, offset) (start, end_) ->
+  Seq.fold_left (fun (res, offset) { whole=(start, end_); groups } ->
     let prefix = String.sub s offset (start - offset) in
+    let replace_item = function
+      | Lit s -> s
+      | WholeMatch -> String.sub s start (end_ - start)
+      | Group i -> 
+        begin match GMap.find_opt i groups with
+        | None -> ""
+        | Some (start, end_) -> String.sub s start (end_ - start)
+        end in
+    let rep = rep |> List.map replace_item |> String.concat "" in
     (res ^ prefix ^ rep, end_)
   ) ("", 0) matches
   |> fun (res, offset) -> res ^ String.sub s offset (String.length s - offset)
@@ -103,4 +147,4 @@ let matches (reg: compiled_regex) (s: string): match_info Seq.t =
       else
         Seq.Cons ((start, end_), filter_empty tl end_) in
   filter_empty (get_all 0) (-1)
-  
+  |> Seq.map (fun (start, end_) -> { whole = (start, end_); groups = GMap.empty })

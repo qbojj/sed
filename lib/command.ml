@@ -121,14 +121,6 @@ let mapM f l =
     | x :: xs -> let* v = f x in impl (v :: acc) xs in
   impl [] l
 
-(*
-number
-first~step
-$
-/regexp/
-\cregexpc (c is any character)
-*)
-
 type echar =
   | Escaped of char
   | Unescaped of char
@@ -239,8 +231,6 @@ let parseAddress (code: pos_str): (pos_str * address option) result =
   | (_, '\\') :: (_, c) :: rest -> let* (rest, reg) = parseRegex rest c in return (rest, Some (Regex reg))
   | (_, c) :: _ when String.contains digits c ->
     let (rest, v) = parseNumber code in
-    print_string "parseAddress\n";
-    Printf.printf "%s\n" (rest |> toString);
     begin match rest with
     | (_, '~') :: ((_, c) :: _) as rest when String.contains digits c ->
       let (rest, step) = parseNumber rest in
@@ -344,6 +334,7 @@ let parseLineCommand (code: pos_str): (pos_str * non_blockmatched_command option
     let* (sep, rest) = match rest with | [] -> err pos "no separator" | (_, c) :: rest -> return (c, rest) in
     let* (rest, src) = parseRegex rest sep in
     let* (rest, dst) = parseToString rest sep in
+    let dst = parse_replacement dst in
     let* (rest, flags) = parseToEnd rest in
     (* parse flags *)
     let flags =

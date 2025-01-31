@@ -90,7 +90,6 @@ let compile (commands: command list): (compiled_program, string) Result.t =
   let labels, _ = get_labels LMap.empty 0 commands in
 
   let (let*) = Result.bind in
-  let (let+) = Result.map in
   let return = Result.ok in
 
   let get_pos l = match LMap.find_opt l labels with | None -> Error ("no label named " ^ l) | Some v -> Ok v in
@@ -213,7 +212,7 @@ let rec zmove z n =
     | [] -> { prev = List.rev z.next; next = [] } (* out of bounds -> make empty *)
     | hd :: tl -> zmove { prev = tl; next = hd :: z.next } (n + 1)
 
-let rec restart z =
+let restart z =
   { prev = []; next = List.rev_append z.prev z.next }
 
 let update_active st cmd =
@@ -228,7 +227,7 @@ let get_active st =
 
 let is_empty st = st.zipper.next = []
 
-let rec e_cmd_is_active st =
+let e_cmd_is_active st =
   let {lineno; pattern; input; _} = st in
   let cmd = get_active st |> Option.get in
   let match_address is_end = function
@@ -263,12 +262,12 @@ let split_line s =
 let line_wrap_and_escape wrap (s: string): string =
   let rec wrap' n s () =
     match s () with
-    | Seq.Nil -> Seq.Nil
+    | Seq.Nil -> Seq.return '$' ()
     | Seq.Cons (hd, tl) ->
       let escaped = String.escaped (String.make 1 hd) in
       let el = String.length escaped in
       let escaped = String.to_seq escaped in
-      if n + el > wrap then
+      if n <> 0 && n + el >= wrap then
         Seq.Cons('\\', fun () -> Seq.Cons('\n', Seq.append escaped (wrap' el tl)))
       else
         (Seq.append escaped (wrap' (n + el) tl)) () in
@@ -340,12 +339,12 @@ let run ({ autoprint; line_wrap }: config) (prog: compiled_program) (input: stri
         | Next ->
           begin match get_line nst with
           | Some pattern, nst -> run' { nst with pattern } ()
-          | None, nst -> run' { nst with pattern="" } ()
+          | None, nst -> new_cycle autoprint nst (* no line -> autoprint and exit *)
           end
         | AppendNext ->
           begin match get_line nst with
-          | Some line, nst -> run' { nst with pattern=pattern ^ line } ()
-          | None, nst -> run' nst ()
+          | Some line, nst -> run' { nst with pattern=pattern ^ "\n" ^ line } ()
+          | None, nst -> new_cycle autoprint nst (* no line -> autoprint and exit *)
           end
         | Print -> Seq.Cons (pattern, run' nst)
         | PrintFirst ->
