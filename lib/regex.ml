@@ -21,7 +21,6 @@ unescaped \digit -> Gruop digit
 any other -> Lit
 *)
 let parse_replacement (str: string): regex_replacement =
-  Printf.printf "parsing replacement: %s\n" str;
   let len = String.length str in
   let rec impl acc i =
     if i = len then acc

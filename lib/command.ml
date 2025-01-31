@@ -173,40 +173,36 @@ let parseRegex (code: pos_str) (endc: char): (pos_str * regex) result =
     | (pos, c) :: rest -> impl pos ((pos, Unescaped c) :: reg_str) rest in
   let* (after_regex, reg_str) = impl { row=(-1); column=(-1) } [] code in
   let position = code |> List.hd |> fst in
-  let get_idx =
-    let idx = ref 1 in
-    fun () -> let v = !idx in idx := v + 1; v
-  in
-  let rec impl acc depth = function
-    | [] as rest when depth = 0 -> return (rest, RList (List.rev acc))
-    | (_, Unescaped ')') :: rest when depth > 0 -> return (rest, RList (List.rev acc))
+  let rec impl acc depth (block_id: int) = function
+    | [] as rest when depth = 0 -> return (rest, RList (List.rev acc), block_id)
+    | (_, Unescaped ')') :: rest when depth > 0 -> return (rest, RList (List.rev acc), block_id)
     | [] -> err position "unterminated group"
     | (pos, Unescaped ')') :: _ -> err pos "unmatched )"
-    | (_, Escaped c) :: rest -> impl (RLit ((=) c) :: acc) depth rest
+    | (_, Escaped c) :: rest -> impl (RLit ((=) c) :: acc) depth block_id rest
     | (_, Unescaped '(') :: (_, Unescaped '?') :: (_, Unescaped ':') :: rest ->
-      let* (rest, reg) = impl [] depth rest in
-      impl (reg :: acc) depth rest
+      let* (rest, reg, block_id) = impl [] depth block_id rest in
+      impl (reg :: acc) depth block_id rest
     | (_, Unescaped '(') :: rest ->
-      let idx = get_idx () in
-      let* (rest, reg) = impl [] (depth + 1) rest in
-      impl (RGroup (reg, idx) :: acc) depth rest
+      let idx = block_id in
+      let* (rest, reg, block_id) = impl [] (depth + 1) (block_id + 1) rest in
+      impl (RGroup (reg, idx) :: acc) depth block_id rest
     | (_, Unescaped '|') :: rest ->
-      let* (rest, reg) = impl [] depth rest in
-      return (rest, ROr (RList (List.rev acc), reg))
+      let* (rest, reg, block_id) = impl [] depth block_id rest in
+      return (rest, ROr (RList (List.rev acc), reg), block_id)
     | (pos, Unescaped '*') :: _ when List.is_empty acc -> err pos "nothing to star"
-    | (_, Unescaped '*') :: rest -> impl (RStar (List.hd acc) :: List.tl acc) depth rest
+    | (_, Unescaped '*') :: rest -> impl (RStar (List.hd acc) :: List.tl acc) depth block_id rest
     | (pos, Unescaped '?') :: _ when List.is_empty acc -> err pos "nothing to opt"
-    | (_, Unescaped '?') :: rest -> impl (ROpt (List.hd acc) :: List.tl acc) depth rest
+    | (_, Unescaped '?') :: rest -> impl (ROpt (List.hd acc) :: List.tl acc) depth block_id rest
     | (pos, Unescaped '+') :: _ when List.is_empty acc -> err pos "nothing to plus"
-    | (_, Unescaped '+') :: rest -> impl (RStar (List.hd acc) :: acc) depth rest
-    | (_, Unescaped '.') :: rest -> impl (RLit (fun _ -> true) :: acc) depth rest
-    | (_, Unescaped '^') :: rest -> impl (RBeg :: acc) depth rest
-    | (_, Unescaped '$') :: rest -> impl (REnd :: acc) depth rest
+    | (_, Unescaped '+') :: rest -> impl (RStar (List.hd acc) :: acc) depth block_id rest
+    | (_, Unescaped '.') :: rest -> impl (RLit (fun _ -> true) :: acc) depth block_id rest
+    | (_, Unescaped '^') :: rest -> impl (RBeg :: acc) depth block_id rest
+    | (_, Unescaped '$') :: rest -> impl (REnd :: acc) depth block_id rest
     | (pos, Unescaped '[') :: rest ->
       let* (rest, reg) = parseCharSet pos rest in
-      impl (reg :: acc) depth rest
-    | (_, Unescaped c) :: rest -> impl (RLit ((=) c) :: acc) depth rest in
-  let* (_, reg) = impl [] 0 reg_str in
+      impl (reg :: acc) depth block_id rest
+    | (_, Unescaped c) :: rest -> impl (RLit ((=) c) :: acc) depth block_id rest in
+  let* (_, reg, _) = impl [] 0 1 reg_str in
   return (after_regex, reg)
 
 let parseToString code endc =
