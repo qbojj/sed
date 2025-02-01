@@ -1,94 +1,246 @@
+module type OrderedType = Set.OrderedType
+
 module type Finite = sig
-  include Set.OrderedType
+  include OrderedType
   val values: t list
 end
 
-module type OrderedType = Set.OrderedType
-
 module type DFA = sig
-  type state
-  type alphabet
+  module State : OrderedType
+  module Alphabet : Finite
   
-  val initial : state
-  val is_accepting : state -> bool
-  val next_state : state -> alphabet -> state option
+  val initial : State.t
+  val is_accepting : State.t -> bool
+  val next_state : State.t -> Alphabet.t -> State.t option
 end
 
 module type NFA = sig
-  type state
-  type alphabet
+  module State : OrderedType
+  module Alphabet : Finite
+
+  module StateSet : Set.S with type elt = State.t
   
-  val initial : state list
-  val is_accepting : state -> bool
-  val next_states : state -> alphabet -> state list
+  val initial : StateSet.t
+  val is_accepting : State.t -> bool
+  val next_states : State.t -> Alphabet.t -> StateSet.t
 end
 
-module Nfa2Dfa (A: Finite) (O: Set.OrderedType) (N: NFA with type alphabet = A.t and type state = O.t) = struct
-  module ISet = Set.Make(Int)
-  module SSet = Set.Make(O)
-  module SSMap = Map.Make(SSet)
+module type NFA_epsilon = sig
+  module State : OrderedType
+  module Alphabet : Finite
 
-  type state = int
-  type alphabet = A.t
+  module StateSet : Set.S with type elt = State.t
+  type token = Epsilon | Symbol of Alphabet.t
+  
+  val initial : StateSet.t
+  val is_accepting : State.t -> bool
+  val next_states : State.t -> token -> StateSet.t
+end
 
-  module TMap = Map.Make(struct
-    type t = state * alphabet
-    let compare (a, a2) (b, b2) =
-      match Int.compare a b with
-      | 0 -> A.compare a2 b2
-      | x -> x
-  end)
+module NfaEpsilon2Nfa (N: NFA_epsilon) (*: NFA with 
+  module Alphabet = N.Alphabet and
+  module State = N.State and
+  module StateSet = N.StateSet *) = 
+struct
+  module State = N.State
+  module Alphabet = N.Alphabet
+  module StateSet = N.StateSet
 
-  type t = {
-    accepting: ISet.t;
-    transitions: state TMap.t;
-    initial: state;
-  }
+  module Impl = struct
+    module SSet = StateSet
+    module SMap = Map.Make(State)
 
-  let dfa =
-    let fresh_state =
-      let counter = ref 0 in
-      fun () -> let s = !counter in counter := s + 1; s in
-    let sm = ref SSMap.empty in
-    let transitions = ref TMap.empty in
+    module EpsElphabet = struct
+      type t = N.token = Epsilon | Symbol of Alphabet.t
+      let values = Epsilon :: List.map (fun a -> Symbol a) Alphabet.values
+    end
+    
+    module TMap = Map.Make(struct
+      type t = State.t * Alphabet.t
+      let compare (a, a2) (b, b2) =
+        match State.compare a b with
+        | 0 -> Alphabet.compare a2 b2
+        | x -> x
+    end)
+  
+    let states =
+      let states = ref N.initial in
+      let rec loop () =
+        let size = SSet.cardinal !states in
+        let states' = SSet.fold (fun s acc ->
+          EpsElphabet.values
+          |> List.fold_left (fun acc a ->
+            N.next_states s a
+            |> SSet.union acc) acc) !states SSet.empty in
+        states := SSet.union !states states';
+        let size' = SSet.cardinal !states in
+        if size = size' then ()
+        else loop () in
+      loop ();
+      !states
+  
+    let epsilon_away =
+      let epsilon_away = Hashtbl.create 51 in
+  
+      states
+      |> SSet.iter (fun s ->
+        let set = Hashtbl.find_opt epsilon_away s |> Option.value ~default:SSet.empty in
+        Hashtbl.replace epsilon_away s (SSet.add s set)
+      );
+  
+      states
+      |> SSet.iter (fun s ->
+        let s' = N.next_states s Epsilon in
+        let set = Hashtbl.find_opt epsilon_away s |> Option.value ~default:SSet.empty in
+        Hashtbl.replace epsilon_away s (SSet.union s' set)
+      );
+    
+      let get_size () = Hashtbl.fold (fun _ v acc -> SSet.cardinal v + acc) epsilon_away 0 in
+    
+      let rec loop () =
+        let size = get_size () in
+        (* fold x -Eps-> y -Eps-> z to x -Eps-> z *)
+        states
+        |> SSet.iter (fun s ->
+          let set = Hashtbl.find_opt epsilon_away s |> Option.value ~default:SSet.empty in
+          let set' = 
+            SSet.fold (fun s' acc ->
+              Hashtbl.find_opt epsilon_away s'
+              |> Option.value ~default:SSet.empty
+              |> SSet.union acc) set set in
+          Hashtbl.replace epsilon_away s set'
+        );
+        let size' = get_size () in
+        if size = size' then ()
+        else loop () in
+      loop ();
+      epsilon_away
+  
+    let transitions =
+      let transitions: ((State.t * Alphabet.t), SSet.t) Hashtbl.t = Hashtbl.create 51 in
+      let add_transition s t d =
+        let set = Hashtbl.find_opt transitions (s, t) |> Option.value ~default:SSet.empty in
+        Hashtbl.replace transitions (s, t) (SSet.add d set) in
+      
+      Seq.product (SSet.to_seq states) (List.to_seq Alphabet.values)
+      |> Seq.iter (fun (s_, c) ->
+        let s = s_ in
+        let s = 
+          Hashtbl.find_opt epsilon_away s
+          |> Option.value ~default:SSet.empty
+          |> SSet.add s in
+        let s = SSet.fold (fun s acc ->
+          N.next_states s (EpsElphabet.Symbol c)
+          |> SSet.union acc
+        ) s SSet.empty in
+        SSet.fold (fun s acc ->
+          Hashtbl.find_opt epsilon_away s
+          |> Option.value ~default:SSet.empty
+          |> SSet.union acc
+        ) s s
+        |> SSet.iter (fun d -> add_transition s_ c d));
+      transitions
+    
+    let accepting =
+      (* new accepting are states that have any epsilon chain to the old accepting state *)
+      states
+      |> SSet.filter (fun s ->
+        Hashtbl.find_opt epsilon_away s
+        |> Option.value ~default:SSet.empty
+        |> SSet.exists N.is_accepting
+      )
+      
+    let initial =
+      N.initial
+      |> SSet.to_seq
+      |> Seq.fold_left (fun acc s ->
+        Hashtbl.find_opt epsilon_away s
+        |> Option.value ~default:SSet.empty
+        |> SSet.union acc
+      ) SSet.empty
+      
+  end
 
-    let initial = fresh_state () in
-    let initial_set = SSet.of_list N.initial in
-    sm := SSMap.add initial_set initial !sm;
+  let initial = Impl.initial
+  let is_accepting s = StateSet.mem s Impl.accepting
+  let next_states s c =
+    Hashtbl.find_opt Impl.transitions (s, c)
+    |> Option.value ~default:StateSet.empty
+end
 
-    let rec loop = function
-    | [] -> ()
-    | x :: xs ->
-      let s = SSMap.find x !sm in
-      A.values 
-      |> List.fold_left (fun acc a ->
-        let next =
-          List.concat_map (Fun.flip N.next_states a) (SSet.elements x)
-          |> SSet.of_list in
-        if SSet.is_empty next then acc
-        else
-          match SSMap.find_opt next !sm with
-          | Some next_state ->
-            transitions := TMap.add (s, a) next_state !transitions;
-            acc (* already visited *)
-          | None -> 
-            let next_state = fresh_state () in
-            sm := SSMap.add next next_state !sm;
-            transitions := TMap.add (s, a) next_state !transitions;
-            next :: acc) xs
-      |> loop
-    in
-    loop [initial_set];
+module Nfa2Dfa (N: NFA) (*: DFA with
+  module Alphabet = N.Alphabet and
+  module State = Int
+  *)
+= struct
+  module State = Int
+  module Alphabet = N.Alphabet
+  
+  module Impl = struct
+    module ISet = Set.Make(Int)
+    module SSet = N.StateSet
+    module SSMap = Map.Make(SSet)
+
+    type state = int
+    type alphabet = Alphabet.t
+
+    module TMap = Map.Make(struct
+      type t = state * alphabet
+      let compare (a, a2) (b, b2) =
+        match Int.compare a b with
+        | 0 -> Alphabet.compare a2 b2
+        | x -> x
+    end)
+
+    let get_after x a =
+      x
+      |> SSet.to_seq
+      |> Seq.map (fun s -> N.next_states s a)
+      |> Seq.fold_left SSet.union SSet.empty
+
+    let state_mapping =
+      let state_mapping = ref SSMap.empty in
+      let register set =
+        let s = !state_mapping |> SSMap.cardinal in
+        state_mapping := SSMap.add set s !state_mapping;
+        () in
+      let rec loop = function
+      | [] -> ()
+      | x :: xs ->
+        Alphabet.values 
+        |> List.fold_left (fun acc a ->
+          let next = get_after x a in
+          match SSMap.find_opt next !state_mapping with
+          | Some _ -> acc
+          | None -> register next; next :: acc) xs
+        |> loop in
+
+      register N.initial;
+      loop [N.initial];
+
+      !state_mapping
+
+    let initial = SSMap.find N.initial state_mapping
+
+    let transitions =
+      let transitions = ref TMap.empty in
+      Seq.product (SSMap.to_seq state_mapping) (List.to_seq Alphabet.values)
+      |> Seq.iter (fun ((s, st), a) ->
+        let next = get_after s a in
+        match SSMap.find_opt next state_mapping with
+        | Some next_state -> transitions := TMap.add (st, a) next_state !transitions
+        | None -> failwith "impossible");
+      !transitions
 
     let accepting =
-      SSMap.fold 
-        (fun s st acc ->
-          if SSet.exists N.is_accepting s then ISet.add st acc else acc)
-        !sm ISet.empty in
-    
-    { accepting; transitions = !transitions; initial }
+      state_mapping
+      |> SSMap.to_seq
+      |> Seq.filter_map (fun (s, st) ->
+        if SSet.exists N.is_accepting s then Some st else None)
+      |> ISet.of_seq
+  end
 
-  let initial = dfa.initial
-  let is_accepting s = ISet.mem s dfa.accepting
-  let next_state s a = TMap.find_opt (s, a) dfa.transitions
+  let initial = Impl.initial
+  let is_accepting s = Impl.ISet.mem s Impl.accepting
+  let next_state s a = Impl.TMap.find_opt (s, a) Impl.transitions
 end

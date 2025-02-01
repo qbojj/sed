@@ -44,22 +44,16 @@ let parse_replacement (str: string): regex_replacement =
   
 module GMap = Map.Make(Int)
 
-type transition =
-  | Char of char
-  | Epsilon
-
 module ISet = Set.Make(Int)
+
+type transition =
+  | Epsilon
+  | Symbol of char
 
 type nfa_eps = {
   initial: int;
   accepting: int;
   transitions: (int * transition, ISet.t) Hashtbl.t;
-}
-
-type nfa = {
-  initial: int list;
-  accepting: int list;
-  transitions: (int * char, ISet.t) Hashtbl.t;
 }
 
 type dfa = {
@@ -74,7 +68,7 @@ module CharFinite = struct
   let values = List.init 256 Char.chr
 end
 
-let nfa_of_regex (reg: regex): nfa_eps =
+let nfa_eps_of_regex (reg: regex): nfa_eps =
   let get_fresh =
     let counter = ref 0 in
     fun () -> let s = !counter in counter := s + 1; s in
@@ -110,7 +104,7 @@ let nfa_of_regex (reg: regex): nfa_eps =
       let end_ = get_fresh () in
       CharFinite.values
       |> List.filter f
-      |> List.iter (fun c -> add_transition start (Char c) end_);
+      |> List.iter (fun c -> add_transition start (Symbol c) end_);
       (start, end_)
     | ROr (r1, r2) ->
       let (start1, end1) = impl r1 in
@@ -139,103 +133,26 @@ let nfa_of_regex (reg: regex): nfa_eps =
   add_transition end_ Epsilon accepting;
 
   CharFinite.values
-  |> List.iter (fun c -> add_transition initial (Char c) initial);
+  |> List.iter (fun c -> add_transition initial (Symbol c) initial);
 
   { initial; accepting; transitions }
 
 
-let nfa_eps_to_nfa ({ initial; accepting; transitions }: nfa_eps): nfa =
-  let states =
-    Hashtbl.fold (fun (s, _) tgt acc -> ISet.add s @@ ISet.union tgt acc) transitions ISet.empty
-    |> ISet.add initial
-    |> ISet.add accepting
-    |> ISet.to_list in
+let dfa_of_nfa_eps ({ initial; accepting; transitions }: nfa_eps): dfa =
+  let module RegexNFAEps = struct
+    module State = Int
+    module Alphabet = CharFinite
+    module StateSet = ISet
+    type token = transition = Epsilon | Symbol of char
 
-  let epsilon_away = Hashtbl.create 51 in
-  Hashtbl.to_seq transitions
-  |> Seq.filter (fun ((_, t), _) -> t = Epsilon)
-  |> Seq.iter (fun ((s, _), s') ->
-    let set = Hashtbl.find_opt epsilon_away s |> Option.value ~default:ISet.empty in
-    Hashtbl.replace epsilon_away s (ISet.union s' set)
-  );
-
-  List.iter (fun s ->
-    let set = Hashtbl.find_opt epsilon_away s |> Option.value ~default:ISet.empty in
-    Hashtbl.replace epsilon_away s (ISet.add s set)
-  ) states;
-
-  let get_size () = Hashtbl.fold (fun _ v acc -> ISet.cardinal v + acc) transitions 0 in
-
-  let rec loop () =
-    let size = get_size () in
-    (* fold x -Eps-> y -Eps-> z to x -Eps-> z *)
-    states
-    |> List.iter (fun s ->
-      let set = Hashtbl.find_opt epsilon_away s |> Option.value ~default:ISet.empty in
-      let set' = 
-        set |> ISet.fold (fun s' acc -> 
-            ISet.union acc (Hashtbl.find_opt epsilon_away s' |> Option.value ~default:ISet.empty
-          )) set in
-      Hashtbl.replace epsilon_away s set'
-    );
-    let size' = get_size () in
-    if size = size' then ()
-    else loop () in
-  loop ();
-  
-  let transitions': ((int * char), ISet.t) Hashtbl.t = Hashtbl.create 51 in
-  let add_transition (s: int) (t: char) (d: int) =
-    let set = Hashtbl.find_opt transitions' (s, t) |> Option.value ~default:ISet.empty in
-    Hashtbl.replace transitions' (s, t) (ISet.add d set) in
-  
-  Seq.product (List.to_seq states) (List.to_seq CharFinite.values)
-  |> Seq.iter (fun (s_, c) ->
-    let s = s_ in
-    let s = 
-      Hashtbl.find_opt epsilon_away s
+    let initial = ISet.singleton initial
+    let is_accepting s = s = accepting
+    let next_states s t =
+      Hashtbl.find_opt transitions (s, t)
       |> Option.value ~default:ISet.empty
-      |> ISet.add s in
-    let s = ISet.fold (fun s acc ->
-      Hashtbl.find_opt transitions (s, Char c)
-      |> Option.value ~default:ISet.empty
-      |> ISet.union acc
-    ) s ISet.empty in
-    ISet.fold (fun s acc ->
-      Hashtbl.find_opt epsilon_away s
-      |> Option.value ~default:ISet.empty
-      |> ISet.union acc
-    ) s s
-    |> ISet.iter (fun d -> add_transition s_ c d));
-
-  (* new accepting are states that have any epsilon chain to the old accepting state *)
-  let accepting = 
-    states
-    |> List.filter (fun s ->
-      Hashtbl.find_opt epsilon_away s
-      |> Option.value ~default:ISet.empty
-      |> ISet.exists (fun d -> d = accepting)
-    ) in
-  
-  let initial =
-    Hashtbl.find_opt epsilon_away initial
-    |> Option.value ~default:ISet.empty
-    |> ISet.to_list in
-
-  { initial; accepting; transitions = transitions' }
-
-let nfa_to_dfa (nfa: nfa): dfa =
-  let module RegexNFA = struct
-    type state = int
-    type alphabet = char
-
-    let initial = nfa.initial
-    let is_accepting s = List.mem s nfa.accepting
-    let next_states s c =
-      Hashtbl.find_opt nfa.transitions (s, c)
-      |> Option.value ~default:ISet.empty
-      |> ISet.to_list
   end in
-  let module RegexDFA = Nfa2Dfa (CharFinite) (Int) (RegexNFA) in
+  let module RegexNFA = NfaEpsilon2Nfa (RegexNFAEps) in
+  let module RegexDFA = Nfa2Dfa (RegexNFA) in
   { initial = RegexDFA.initial; accepting = RegexDFA.is_accepting; transitions = RegexDFA.next_state }
 
 type compiled_regex =
@@ -293,10 +210,7 @@ let compile ({case_insensitive; supports_groups; detection_only}: regex_config) 
 
   let dfa_compatible = dfa_compatible reg in  
   if not supports_groups && dfa_compatible && detection_only then
-    let nfa = nfa_of_regex reg in
-    let nfa = nfa_eps_to_nfa nfa in
-    let dfa = nfa_to_dfa nfa in  
-    DFA dfa
+    DFA (reg |> nfa_eps_of_regex |> dfa_of_nfa_eps)
   else
     Simple reg
 
