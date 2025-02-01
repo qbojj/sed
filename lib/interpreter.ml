@@ -60,7 +60,7 @@ let compile (commands: command list): (compiled_program, string) Result.t =
   let compile_address: address -> c_address = function
     | Line n -> Line n
     | Steps (n, m) -> Steps (n, m)
-    | Command.Regex r -> Regex (Regex.compile {supports_groups=false; case_insensitive=false} r)
+    | Command.Regex r -> Regex (Regex.compile {supports_groups=false; case_insensitive=false; detection_only=true} r)
     | Last -> Last in
   let compile_address_opt: (address * bool) option -> (c_address_range * bool) = function
     | None -> Always, false
@@ -72,7 +72,7 @@ let compile (commands: command list): (compiled_program, string) Result.t =
   let compile_replace_info ({ src; dst; flags }: replace_info): c_replace_info =
     let case_insensitive = List.mem CaseInsensitive flags in
     let group_usage_free = List.for_all (function Group _ -> false | _ -> true) dst in
-    let src = Regex.compile { case_insensitive; supports_groups = not group_usage_free } src in
+    let src = Regex.compile { case_insensitive; supports_groups = not group_usage_free; detection_only = false } src in
     let multimatch = List.mem MultiMatch flags in
     { src; dst; multimatch } in
 

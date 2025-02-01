@@ -1,3 +1,5 @@
+open Dfa
+
 type regex =
   | RBeg
   | REnd
@@ -42,7 +44,159 @@ let parse_replacement (str: string): regex_replacement =
   
 module GMap = Map.Make(Int)
 
-type compiled_regex = regex
+type transition =
+  | Char of char
+  | Epsilon
+
+module ISet = Set.Make(Int)
+
+type nfa_eps = {
+  initial: int;
+  accepting: int;
+  transitions: (int * transition, ISet.t) Hashtbl.t;
+}
+
+type nfa = {
+  initial: int;
+  accepting: int;
+  transitions: (int * char, ISet.t) Hashtbl.t;
+}
+
+type dfa = {
+  initial: int;
+  accepting: int -> bool;
+  transitions: int -> char -> int option;
+}
+
+module CharFinite = struct
+  type t = char
+  let compare = Char.compare
+  let values = List.init 256 Char.chr
+end
+
+let nfa_of_regex (reg: regex): nfa_eps =
+  let get_fresh =
+    let counter = ref 0 in
+    fun () -> let s = !counter in counter := s + 1; s in
+  let transitions = Hashtbl.create 51 in
+  let add_transition s t s' =
+    let set = Hashtbl.find_opt transitions (s, t) |> Option.value ~default:ISet.empty in
+    Hashtbl.replace transitions (s, t) (ISet.add s' set) in
+  let rec impl: regex -> int * int = function
+    | RBeg -> failwith "Don't know"
+    | REnd -> failwith "Don't know"
+    | RStar r ->
+      let (start, end_) = impl r in
+      let s = get_fresh () in
+      add_transition s Epsilon start;
+      add_transition end_ Epsilon s;
+      (s, s)
+    | ROpt r ->
+      let (start, end_) = impl r in
+      let s = get_fresh () in
+      let e = get_fresh () in
+      add_transition s Epsilon start;
+      add_transition end_ Epsilon e;
+      add_transition s Epsilon e;
+      (s, e)
+    | RLit f ->
+      let start = get_fresh () in
+      let end_ = get_fresh () in
+      CharFinite.values
+      |> List.filter f
+      |> List.iter (fun c -> add_transition start (Char c) end_);
+      (start, end_)
+    | ROr (r1, r2) ->
+      let (start1, end1) = impl r1 in
+      let (start2, end2) = impl r2 in
+      let start = get_fresh () in
+      let end_ = get_fresh () in
+      add_transition start Epsilon start1;
+      add_transition start Epsilon start2;
+      add_transition end1 Epsilon end_;
+      add_transition end2 Epsilon end_;
+      (start, end_)
+    | RList rl ->
+      let (start, end_) = List.fold_left (fun (start, end_) r ->
+        let (start', end') = impl r in
+        add_transition end_ Epsilon start';
+        (start, end')
+      ) (get_fresh (), get_fresh ()) rl in
+      (start, end_)
+    | RGroup (r, _) -> impl r in
+  let (initial, end_) = impl reg in
+  { initial; accepting = end_; transitions }
+
+let nfa_eps_to_nfa ({ initial; accepting; transitions }: nfa_eps): nfa =
+  let states =
+    Hashtbl.fold (fun (s, _) tgt acc -> ISet.add s @@ ISet.union tgt acc) transitions ISet.empty
+    |> ISet.add initial
+    |> ISet.add accepting
+    |> ISet.to_list in
+
+  let epsilon_away = Hashtbl.create 51 in
+  Hashtbl.to_seq transitions
+  |> Seq.filter (fun ((_, t), _) -> t = Epsilon)
+  |> Seq.iter (fun ((s, _), s') ->
+    let set = Hashtbl.find_opt epsilon_away s |> Option.value ~default:ISet.empty in
+    Hashtbl.replace epsilon_away s (ISet.union s' set)
+  );
+
+  let get_size () = Hashtbl.fold (fun _ v acc -> ISet.cardinal v + acc) transitions 0 in
+
+  let rec loop () =
+    let size = get_size () in
+    (* fold x -Eps-> y -Eps-> z to x -Eps-> z *)
+    states
+    |> List.iter (fun s ->
+      let set = Hashtbl.find_opt epsilon_away s |> Option.value ~default:ISet.empty in
+      let set' = 
+        set |> ISet.fold (fun s' acc -> 
+            ISet.union acc (Hashtbl.find_opt epsilon_away s' |> Option.value ~default:ISet.empty
+          )) set in
+      Hashtbl.replace epsilon_away s set'
+    );
+    let size' = get_size () in
+    if size = size' then ()
+    else loop () in
+  loop ();
+  
+  let transitions' = Hashtbl.create 51 in
+  let add_transition s t d =
+    let set = Hashtbl.find_opt transitions' (s, t) |> Option.value ~default:ISet.empty in
+    Hashtbl.replace transitions' (s, t) (ISet.add d set) in
+  
+  transitions
+  |> Hashtbl.to_seq
+  |> Seq.iter (fun ((s, t), d) ->
+    match t with
+    | Epsilon -> ()
+    | Char c ->
+      ISet.to_seq d
+      |> Seq.iter (fun d' -> 
+        Hashtbl.find_opt epsilon_away d' 
+        |> Option.value ~default:ISet.empty
+        |> ISet.iter (fun d'' -> add_transition s c d'')));
+  { initial; accepting; transitions = transitions' }
+
+let nfa_to_dfa (nfa: nfa): dfa =
+  let module RegexDFA = Nfa2Dfa (CharFinite) (Int) (struct
+    type state = int
+    type alphabet = char
+
+    let initial = [nfa.initial]
+    let is_accepting s = s = nfa.accepting
+    let next_states s c =
+      Hashtbl.find_opt nfa.transitions (s, c) 
+      |> Option.value ~default:ISet.empty
+      |> ISet.to_list
+  end) in
+  { initial = RegexDFA.initial; accepting = RegexDFA.is_accepting; transitions = RegexDFA.next_state }
+
+type compiled_regex =
+  | Simple of regex
+  | DFA of dfa
+
 type match_info = {
   whole: int * int;
   groups: (int * int) GMap.t;
@@ -51,21 +205,55 @@ type match_info = {
 type regex_config = {
   case_insensitive: bool;
   supports_groups: bool;
+  detection_only: bool;
 }
 
-let compile ({case_insensitive; supports_groups}: regex_config) (reg: regex): compiled_regex =
-  let rec impl = function
-    | RBeg -> RBeg
-    | REnd -> REnd
-    | RStar r -> RStar (impl r)
-    | ROpt r -> ROpt (impl r)
-    | RLit f when not case_insensitive -> RLit f
-    | RLit f -> RLit (fun c -> f @@ Char.lowercase_ascii c || f @@ Char.uppercase_ascii c)
-    | ROr (r1, r2) -> ROr (impl r1, impl r2)
-    | RList rl -> RList (List.map impl rl)
-    | RGroup (r, _) when not supports_groups -> r
-    | RGroup (r, i) -> RGroup (r, i) in
-  impl reg
+let rec has_groups = function
+  | RBeg | REnd | RStar _ | ROpt _ | RLit _ -> false
+  | ROr (r1, r2) -> has_groups r1 || has_groups r2
+  | RList rl -> List.exists has_groups rl
+  | RGroup _ -> true
+
+let rec dfa_compatible = function
+  | RBeg | REnd -> false
+  | RStar _ | ROpt _ | RLit _ -> true
+  | ROr (r1, r2) -> dfa_compatible r1 && dfa_compatible r2
+  | RList rl -> List.for_all dfa_compatible rl
+  | RGroup _ -> false
+
+let rec make_insensitive = function
+  | RBeg -> RBeg
+  | REnd -> REnd
+  | RStar r -> RStar (make_insensitive r)
+  | ROpt r -> ROpt (make_insensitive r)
+  | RLit f -> RLit (fun c -> f @@ Char.lowercase_ascii c || f @@ Char.uppercase_ascii c)
+  | ROr (r1, r2) -> ROr (make_insensitive r1, make_insensitive r2)
+  | RList rl -> RList (List.map make_insensitive rl)
+  | RGroup (r, i) -> RGroup (make_insensitive r, i)
+
+let rec remove_groups = function
+  | RBeg -> RBeg
+  | REnd -> REnd
+  | RStar r -> RStar (remove_groups r)
+  | ROpt r -> ROpt (remove_groups r)
+  | RLit f -> RLit f
+  | ROr (r1, r2) -> ROr (remove_groups r1, remove_groups r2)
+  | RList rl -> RList (List.map remove_groups rl)
+  | RGroup (r, _) -> remove_groups r
+
+let compile ({case_insensitive; supports_groups; detection_only}: regex_config) (reg: regex): compiled_regex =
+  let supports_groups = supports_groups && has_groups reg in
+  let reg = if case_insensitive then make_insensitive reg else reg in
+  let reg = if not supports_groups then remove_groups reg else reg in
+  
+  if not supports_groups && dfa_compatible reg && detection_only then
+    let nfa = nfa_of_regex reg in
+    let nfa = nfa_eps_to_nfa nfa in
+    let dfa = nfa_to_dfa nfa in
+    DFA dfa |> ignore; (* TODO *)
+    Simple reg
+  else
+    Simple reg
 
 let replace_all (rep: regex_replacement) (s: string) (matches: match_info Seq.t): string =
   (* matches are non intersecting and in ascending order *)
@@ -140,7 +328,19 @@ let matches_from (reg: regex) (from: int) (s: string): match_info Seq.t =
   match_single reg from GMap.empty
   |> Seq.map (fun (v, groups) -> { whole = (from, Option.value ~default:from v); groups })
 
-let matches (reg: compiled_regex) (s: string): match_info Seq.t =
+(* filter empty matches that are adjustent to any non-empty matches *)
+let rec filter_empty t prev_end () =
+  match t () with
+  | Seq.Nil -> Seq.Nil
+  | Seq.Cons ({ whole=start, end_; _ } as m, tl) ->
+    if start = end_
+    then
+      if prev_end = start then filter_empty tl end_ ()
+      else Seq.Cons (m, filter_empty tl end_)
+    else
+      Seq.Cons (m, filter_empty tl end_)
+
+let matches_simple (reg: regex) (s: string): match_info Seq.t =
   let rec get_all fst_idx () =
     if fst_idx > String.length s then
       Seq.Nil
@@ -155,16 +355,21 @@ let matches (reg: compiled_regex) (s: string): match_info Seq.t =
           ) v1 tl in
         let ma_e = snd ma.whole in
         Seq.Cons (ma, if ma_e = fst_idx then get_all (ma_e+1) else get_all ma_e) in
-  
-  (* filter empty matches that are adjustent to any non-empty matches *)
-  let rec filter_empty t prev_end () =
-    match t () with
-    | Seq.Nil -> Seq.Nil
-    | Seq.Cons ({ whole=start, end_; _ } as m, tl) ->
-      if start = end_
-      then
-        if prev_end = start then filter_empty tl end_ ()
-        else Seq.Cons (m, filter_empty tl end_)
-      else
-        Seq.Cons (m, filter_empty tl end_) in
   filter_empty (get_all 0) (-1)
+
+let matches_dfa (dfa: dfa) (s: string): match_info Seq.t =
+  (* detection only (the matches are not exact) *)
+  let rec impl pos state =
+    if dfa.accepting state then
+      Some { whole=0, pos; groups = GMap.empty }
+    else
+      if pos >= String.length s then
+        None
+      else
+        impl (pos+1) (dfa.transitions state s.[pos] |> Option.value ~default:dfa.initial) in
+  fun () -> (impl 0 dfa.initial |> Option.to_seq) ()
+
+let matches (reg: compiled_regex) (s: string): match_info Seq.t =
+  match reg with
+  | Simple reg -> matches_simple reg s
+  | DFA dfa -> matches_dfa dfa s

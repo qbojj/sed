@@ -22,6 +22,7 @@ val parse_replacement : string -> regex_replacement
 type regex_config = {
   case_insensitive: bool;
   supports_groups: bool;
+  detection_only: bool;
 }
 
 val compile : regex_config -> regex -> compiled_regex
