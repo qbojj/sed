@@ -5,7 +5,7 @@ end
 
 module type OrderedType = Set.OrderedType
 
-module type Dfa = sig
+module type DFA = sig
   type state
   type alphabet
   
@@ -14,7 +14,7 @@ module type Dfa = sig
   val next_state : state -> alphabet -> state option
 end
 
-module type Nfa = sig
+module type NFA = sig
   type state
   type alphabet
   
@@ -24,4 +24,4 @@ module type Nfa = sig
 end
 
 module Nfa2Dfa : functor (A: Finite) (O: Set.OrderedType) 
-  (N: Nfa with type alphabet = A.t and type state = O.t) -> Dfa with type alphabet = N.alphabet and type state = int
+  (N: NFA with type alphabet = A.t and type state = O.t) -> DFA with type alphabet = N.alphabet and type state = int

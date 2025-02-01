@@ -5,7 +5,7 @@ end
 
 module type OrderedType = Set.OrderedType
 
-module type Dfa = sig
+module type DFA = sig
   type state
   type alphabet
   
@@ -14,7 +14,7 @@ module type Dfa = sig
   val next_state : state -> alphabet -> state option
 end
 
-module type Nfa = sig
+module type NFA = sig
   type state
   type alphabet
   
@@ -23,9 +23,10 @@ module type Nfa = sig
   val next_states : state -> alphabet -> state list
 end
 
-module Nfa2Dfa (A: Finite) (O: Set.OrderedType) (N: Nfa with type alphabet = A.t and type state = O.t) = struct
+module Nfa2Dfa (A: Finite) (O: Set.OrderedType) (N: NFA with type alphabet = A.t and type state = O.t) = struct
   module ISet = Set.Make(Int)
   module SSet = Set.Make(O)
+  module SSMap = Map.Make(SSet)
 
   type state = int
   type alphabet = A.t
@@ -48,39 +49,44 @@ module Nfa2Dfa (A: Finite) (O: Set.OrderedType) (N: Nfa with type alphabet = A.t
     let fresh_state =
       let counter = ref 0 in
       fun () -> let s = !counter in counter := s + 1; s in
-    let sm = Hashtbl.create 51 in
-    let accepting = ref ISet.empty in
+    let sm = ref SSMap.empty in
     let transitions = ref TMap.empty in
+
     let initial = fresh_state () in
     let initial_set = SSet.of_list N.initial in
-    Hashtbl.replace sm initial_set initial;
+    sm := SSMap.add initial_set initial !sm;
+
     let rec loop = function
     | [] -> ()
     | x :: xs ->
-      let s = Hashtbl.find sm x in
-      if SSet.exists (Fun.flip List.mem N.initial) x then accepting := ISet.add s !accepting;
+      let s = SSMap.find x !sm in
       A.values 
-      |> List.to_seq
-      |> Seq.filter_map (fun a ->
-        let next = SSet.of_list (List.concat (List.map (fun s -> N.next_states s a) (SSet.elements x))) in
-        (* if empty -> skip *)
-        if SSet.is_empty next then None
+      |> List.fold_left (fun acc a ->
+        let next =
+          List.concat_map (Fun.flip N.next_states a) (SSet.elements x)
+          |> SSet.of_list in
+        if SSet.is_empty next then acc
         else
-          match Hashtbl.find_opt sm next with
+          match SSMap.find_opt next !sm with
           | Some next_state ->
             transitions := TMap.add (s, a) next_state !transitions;
-            None (* already visited *)
+            acc (* already visited *)
           | None -> 
             let next_state = fresh_state () in
-            Hashtbl.replace sm next next_state;
+            sm := SSMap.add next next_state !sm;
             transitions := TMap.add (s, a) next_state !transitions;
-            Some next)
-      |> List.of_seq
-      |> List.append xs
+            next :: acc) xs
       |> loop
     in
     loop [initial_set];
-    { accepting = !accepting; transitions = !transitions; initial = initial }
+
+    let accepting =
+      SSMap.fold 
+        (fun s st acc ->
+          if SSet.exists N.is_accepting s then ISet.add st acc else acc)
+        !sm ISet.empty in
+    
+    { accepting; transitions = !transitions; initial }
 
   let initial = dfa.initial
   let is_accepting s = ISet.mem s dfa.accepting
