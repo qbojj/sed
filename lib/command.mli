@@ -1,22 +1,19 @@
 open Regex
 
-type address =
-  | Line of int
-  | Steps of int * int
-  | Regex of regex
-  | Last
+type address = Line of int | Steps of int * int | Regex of regex | Last
 
-type address_range = 
+type address_range =
   | Always
   | Single of address * bool
   | Range of address * address * bool
 
-type replace_flags =
-  | CaseInsensitive
-  | MultiMatch
+type replace_flags = CaseInsensitive | MultiMatch
 
-type replace_info =
-  { src: regex; dst: regex_replacement; flags: replace_flags list }
+type replace_info = {
+  src : regex;
+  dst : regex_replacement;
+  flags : replace_flags list;
+}
 
 type command =
   | Label of string
@@ -46,6 +43,6 @@ type command =
   | ExchangeHold of address_range
   | Transliterate of address_range * (char * char) list
 
-type parse_error = { row: int; column: int; msg: string }
+type parse_error = { row : int; column : int; msg : string }
 
 val parseScript : string -> (command list, parse_error) Result.t
