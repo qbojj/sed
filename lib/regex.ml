@@ -71,6 +71,8 @@ let parse_replacement (str : string) : regex_replacement =
          | _ -> x :: acc)
        []
 
+type re_to_nfa_bstate = { he : int; e : int; h : int; mid : int }
+
 let nfa_eps_of_regex (reg : regex) : nfa_eps =
   let get_fresh =
     let counter = ref 0 in
@@ -86,48 +88,69 @@ let nfa_eps_of_regex (reg : regex) : nfa_eps =
     in
     Hashtbl.replace transitions (s, t) (ISet.add s' set)
   in
-  let initial = get_fresh () in
-  let get_fresh () =
-    let v = get_fresh () in
-    add_transition v Epsilon initial;
-    v
-  in
-  let accepting = get_fresh () in
-  let rec impl : regex -> int * int = function
-    | RBeg -> failwith "Don't know"
-    | REnd -> failwith "Don't know"
+  let get_b_fresh () =
+    let he = get_fresh () in
+    let e = get_fresh () in
+    let h = get_fresh () in
+    let mid = get_fresh () in
+    add_transition h Epsilon mid;
+    add_transition h Epsilon he;
+    add_transition he Epsilon e;
+    add_transition mid Epsilon e;
+    { he; e; h; mid } in
+  let add_b_transition { he; e; h; mid } t s' =
+    add_transition mid t s'.mid;
+    if t = Epsilon then
+      add_transition he Epsilon s'.he;
+      add_transition h Epsilon s'.h;
+      add_transition e Epsilon s'.e in
+  let initial = get_b_fresh () in
+  let accepting = get_b_fresh () in
+  let rec impl : regex -> re_to_nfa_bstate * re_to_nfa_bstate = function
+    | RBeg ->
+        let start = get_b_fresh () in
+        let end_ = get_b_fresh () in
+        add_transition start.h Epsilon end_.h;
+        add_transition start.he Epsilon end_.he;
+        (start, end_)
+    | REnd ->
+        let start = get_b_fresh () in
+        let end_ = get_b_fresh () in
+        add_transition start.e Epsilon end_.e;
+        add_transition start.he Epsilon end_.he;
+        (start, end_)
     | RStar r ->
         let start, end_ = impl r in
-        let s = get_fresh () in
-        add_transition s Epsilon start;
-        add_transition end_ Epsilon s;
+        let s = get_b_fresh () in
+        add_b_transition s Epsilon start;
+        add_b_transition end_ Epsilon s;
         (s, s)
     | ROpt r ->
         let start, end_ = impl r in
-        let s = get_fresh () in
-        let e = get_fresh () in
-        add_transition s Epsilon start;
-        add_transition end_ Epsilon e;
-        add_transition s Epsilon e;
+        let s = get_b_fresh () in
+        let e = get_b_fresh () in
+        add_b_transition s Epsilon start;
+        add_b_transition end_ Epsilon e;
+        add_b_transition s Epsilon e;
         (s, e)
     | RLit f ->
-        let start = get_fresh () in
-        let end_ = get_fresh () in
+        let start = get_b_fresh () in
+        let end_ = get_b_fresh () in
         CharFinite.values |> List.filter f
-        |> List.iter (fun c -> add_transition start (Symbol c) end_);
+        |> List.iter (fun c -> add_transition start.mid (Symbol c) end_.mid);
         (start, end_)
     | ROr (r1, r2) ->
         let start1, end1 = impl r1 in
         let start2, end2 = impl r2 in
-        let start = get_fresh () in
-        let end_ = get_fresh () in
-        add_transition start Epsilon start1;
-        add_transition start Epsilon start2;
-        add_transition end1 Epsilon end_;
-        add_transition end2 Epsilon end_;
+        let start = get_b_fresh () in
+        let end_ = get_b_fresh () in
+        add_b_transition start Epsilon start1;
+        add_b_transition start Epsilon start2;
+        add_b_transition end1 Epsilon end_;
+        add_b_transition end2 Epsilon end_;
         (start, end_)
     | RList [] ->
-        let v = get_fresh () in
+        let v = get_b_fresh () in
         (v, v)
     | RList (x :: rl) ->
         let start, end_ = impl x in
@@ -135,7 +158,7 @@ let nfa_eps_of_regex (reg : regex) : nfa_eps =
           List.fold_left
             (fun end_ r ->
               let start', end' = impl r in
-              add_transition end_ Epsilon start';
+              add_b_transition end_ Epsilon start';
               end')
             end_ rl
         in
@@ -143,13 +166,15 @@ let nfa_eps_of_regex (reg : regex) : nfa_eps =
     | RGroup (r, _) -> impl r
   in
   let start, end_ = impl reg in
-  add_transition initial Epsilon start;
-  add_transition end_ Epsilon accepting;
+  add_b_transition initial Epsilon start;
+  add_b_transition end_ Epsilon accepting;
 
   CharFinite.values
-  |> List.iter (fun c -> add_transition initial (Symbol c) initial);
+  |> List.iter (fun c -> 
+    add_transition initial.mid (Symbol c) initial.mid;
+    add_transition accepting.mid (Symbol c) accepting.mid);
 
-  { initial; accepting; transitions }
+  { initial=initial.h; accepting=accepting.e; transitions }
 
 let dfa_of_nfa_eps ({ initial; accepting; transitions } : nfa_eps) :
     compiled_regex =
@@ -169,16 +194,15 @@ let dfa_of_nfa_eps ({ initial; accepting; transitions } : nfa_eps) :
   let module RegexNFA = NfaEpsilon2Nfa (RegexNFAEps) in
   let module RegexDFA = Nfa2Dfa (RegexNFA) in
   let match_dfa (s : string) : match_info Seq.t =
-    let rec impl pos state =
-      if RegexDFA.is_accepting state then
-        Some { whole = (0, pos); groups = GMap.empty }
-      else if pos >= String.length s then None
+    fun () ->
+      let s_end = String.fold_left
+        (fun state c ->
+          RegexDFA.next_state state c |> Option.value ~default:RegexDFA.initial)
+        RegexDFA.initial s in
+      if RegexDFA.is_accepting s_end then
+        Seq.Cons ({ whole = (0, String.length s); groups = GMap.empty }, Seq.empty)
       else
-        impl (pos + 1)
-          (RegexDFA.next_state state s.[pos]
-          |> Option.value ~default:RegexDFA.initial)
-    in
-    fun () -> (impl 0 RegexDFA.initial |> Option.to_seq) ()
+        Seq.Nil
   in
   match_dfa
 
@@ -187,13 +211,6 @@ let rec has_groups = function
   | ROr (r1, r2) -> has_groups r1 || has_groups r2
   | RList rl -> List.exists has_groups rl
   | RGroup _ -> true
-
-let rec dfa_compatible = function
-  | RBeg | REnd -> false
-  | RStar _ | ROpt _ | RLit _ -> true
-  | ROr (r1, r2) -> dfa_compatible r1 && dfa_compatible r2
-  | RList rl -> List.for_all dfa_compatible rl
-  | RGroup _ -> false
 
 let rec make_insensitive = function
   | RBeg -> RBeg
@@ -333,8 +350,7 @@ let compile
   let reg = if case_insensitive then make_insensitive reg else reg in
   let reg = if not supports_groups then remove_groups reg else reg in
 
-  let dfa_compatible = dfa_compatible reg in
-  if (not supports_groups) && dfa_compatible && detection_only then
+  if (not supports_groups) && detection_only then
     reg |> nfa_eps_of_regex |> dfa_of_nfa_eps
   else matches_simple reg
 
