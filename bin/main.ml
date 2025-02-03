@@ -98,6 +98,7 @@ let run_err source_list file_list no_autoprint line_wrap inplace separate
 
 let run source_list file_list no_autoprint line_wrap inplace separate
     input_files =
+  Printexc.record_backtrace true;
   let separate = separate || Option.is_some inplace in
   let input_files, source_list =
     match (source_list, input_files) with

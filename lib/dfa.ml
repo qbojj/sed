@@ -230,6 +230,8 @@ module Nfa2Dfa (N : NFA) : DFA with module Alphabet = N.Alphabet = struct
             |> List.fold_left
                  (fun acc a ->
                    let next = get_after x a in
+                   if SSet.is_empty next then acc
+                   else
                    match SSMap.find_opt next !state_mapping with
                    | Some _ -> acc
                    | None ->
@@ -252,9 +254,9 @@ module Nfa2Dfa (N : NFA) : DFA with module Alphabet = N.Alphabet = struct
       |> Seq.iter (fun ((s, st), a) ->
              let next = get_after s a in
              match SSMap.find_opt next state_mapping with
-             | Some next_state ->
-                 transitions := TMap.add (st, a) next_state !transitions
-             | None -> failwith "impossible");
+            | Some next_state ->
+                transitions := TMap.add (st, a) next_state !transitions
+            | None -> () (* empty set *));
       !transitions
 
     let accepting =
