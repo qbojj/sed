@@ -16,28 +16,35 @@ type regex_replacement = regex_replacement_item list
 module GMap = Map.Make (Int)
 module ISet = Set.Make (Int)
 
-type transition = Epsilon | Symbol of char
-
-type nfa_eps = {
-  initial : int;
-  accepting : int;
-  transitions : (int * transition, ISet.t) Hashtbl.t;
-}
-
-type 'a simple_matcher_group = {
-  hat_end : 'a;
-  end_ : 'a;
-  hat : 'a;
-  mid : 'a;
-}
-type re_to_nfa_bstate = { he : int; e : int; h : int; mid : int }
-
-module CharFinite = struct
+module CharFinite: Finite with type t = char = struct
   type t = char
 
   let compare = Char.compare
   let values = List.init 256 Char.chr
 end
+
+type char_beg_end =
+  | Char of char
+  | Beg
+  | End
+
+module CharBegEndFinite = struct
+  type t = char_beg_end
+
+  let compare = compare
+  let values = Beg :: End :: List.map (fun c -> Char c) CharFinite.values
+end
+
+type transition = Epsilon | Symbol of char_beg_end
+
+type nfa_eps = {
+  initial : ISet.t;
+  accepting : ISet.t;
+  transitions : (int * transition, ISet.t) Hashtbl.t;
+}
+
+type re_to_nfa_bstate = { he : int; e : int; h : int; mid : int }
+
 
 type match_info = { whole : int * int; groups : (int * int) GMap.t }
 type compiled_regex = string -> match_info Seq.t
@@ -79,7 +86,7 @@ let parse_replacement (str : string) : regex_replacement =
          | _ -> x :: acc)
        []
 
-let nfa_eps_of_regex (reg : regex) (is_holding : bool) : nfa_eps simple_matcher_group =
+let nfa_eps_of_regex (reg : regex) (is_holding : bool) : nfa_eps =
   let get_fresh =
     let counter = ref 0 in
     fun () ->
@@ -100,16 +107,17 @@ let nfa_eps_of_regex (reg : regex) (is_holding : bool) : nfa_eps simple_matcher_
     let h = get_fresh () in
     let mid = get_fresh () in
     add_transition h Epsilon mid;
-    add_transition h Epsilon he;
+    add_transition h (Symbol End) he;
     add_transition he Epsilon e;
-    add_transition mid Epsilon e;
-    { he; e; h; mid } in
+    add_transition mid (Symbol End) e;
+    { he; e; h; mid }
+  in
   let add_b_transition { he; e; h; mid } t s' =
     add_transition mid t s'.mid;
-    if t = Epsilon then
-      add_transition he Epsilon s'.he;
-      add_transition h Epsilon s'.h;
-      add_transition e Epsilon s'.e in
+    if t = Epsilon then add_transition he Epsilon s'.he;
+    add_transition h Epsilon s'.h;
+    add_transition e Epsilon s'.e
+  in
   let initial = get_b_fresh () in
   let accepting = get_b_fresh () in
   let rec impl : regex -> re_to_nfa_bstate * re_to_nfa_bstate = function
@@ -142,8 +150,10 @@ let nfa_eps_of_regex (reg : regex) (is_holding : bool) : nfa_eps simple_matcher_
     | RLit f ->
         let start = get_b_fresh () in
         let end_ = get_b_fresh () in
-        CharFinite.values |> List.filter f
-        |> List.iter (fun c -> add_transition start.mid (Symbol c) end_.mid);
+        CharFinite.values
+        |> List.filter f
+        |> List.map (fun c -> Symbol (Char c))
+        |> List.iter (fun c -> add_transition start.mid c end_.mid);
         (start, end_)
     | ROr (r1, r2) ->
         let start1, end1 = impl r1 in
@@ -175,103 +185,121 @@ let nfa_eps_of_regex (reg : regex) (is_holding : bool) : nfa_eps simple_matcher_
   add_b_transition initial Epsilon start;
   add_b_transition end_ Epsilon accepting;
 
-  if is_holding then
-    CharFinite.values
-    |> List.iter (fun c -> 
-      add_transition initial.mid (Symbol c) initial.mid;
-      add_transition accepting.mid (Symbol c) accepting.mid);
+  let iinitial = get_fresh () in
+  add_transition iinitial Epsilon initial.mid;
 
-  {
-    hat_end={ initial=initial.h; accepting=accepting.e; transitions };
-    hat={ initial=initial.h; accepting=accepting.mid; transitions };
-    end_={ initial=initial.mid; accepting=accepting.e; transitions };
-    mid={ initial=initial.mid; accepting=accepting.mid; transitions };
+  let iiinitial = get_fresh () in
+  add_transition iiinitial Epsilon iinitial;
+  add_transition iiinitial (Symbol Beg) initial.h;
+
+  if is_holding then
+    CharBegEndFinite.values
+    |> List.map (fun c -> Symbol c)
+    |> List.iter (fun c -> add_transition iinitial c iinitial);
+
+  { initial = ISet.singleton iiinitial;
+    accepting = ISet.of_list [ accepting.mid; accepting.e ]; 
+    transitions
   }
 
-module NFAEps2NFAEps (F : sig val v : nfa_eps end) = struct
+module NFAEps2NFAEps (F : sig val v : nfa_eps end) =
+struct
   module State = Int
-  module Alphabet = CharFinite
+  module Alphabet = CharBegEndFinite
   module StateSet = ISet
 
-  type token = transition = Epsilon | Symbol of char
+  type token = transition = Epsilon | Symbol of char_beg_end
 
-  let initial = ISet.singleton F.v.initial
-  let is_accepting s = s = F.v.accepting
+  let initial = F.v.initial
+  let is_accepting s = ISet.mem s F.v.accepting
 
   let next_states s t =
     Hashtbl.find_opt F.v.transitions (s, t) |> Option.value ~default:ISet.empty
 end
 
-module NFAEps2DFA (F: sig val v : nfa_eps end) = Nfa2Dfa (NfaEpsilon2Nfa (NFAEps2NFAEps (F)))
+module NFAEps2DFA (F : sig val v : nfa_eps end) = Nfa2Dfa (NfaEpsilon2Nfa (NFAEps2NFAEps (F)))
 
-let whole_matcher_of_nfa (nfa_eps : nfa_eps simple_matcher_group) : compiled_regex =
-  let module RegexDFA = NFAEps2DFA (struct let v = nfa_eps.hat_end end) in
-  let match_dfa (s : string) : match_info Seq.t =
-    fun () ->
-      let s_end = String.fold_left
-        (fun state c ->
-          RegexDFA.next_state state c |> Option.value ~default:RegexDFA.initial)
-        RegexDFA.initial s in
-      if RegexDFA.is_accepting s_end then
-        Seq.Cons ({ whole = (0, String.length s); groups = GMap.empty }, Seq.empty)
+let regex_detector (re : regex) : compiled_regex =
+  let module RegexDFA = NFAEps2DFA (struct let v = nfa_eps_of_regex re true end) in
+  let match_dfa (s : string) () : match_info Seq.node =
+    let rec impl state offset =
+      if RegexDFA.is_accepting state then
+        Seq.Cons ({ whole = (0, offset); groups = GMap.empty }, Seq.empty)
       else
-        Seq.Nil
-  in
+        if offset >= String.length s then
+          match RegexDFA.next_state state End with
+          | Some state' when RegexDFA.is_accepting state' ->
+              Seq.Cons ({ whole = (0, offset); groups = GMap.empty }, Seq.empty)
+          | _ -> Seq.Nil
+        else
+          match RegexDFA.next_state state (Char s.[offset]) with
+          | None -> Seq.Nil
+          | Some state' -> impl state' (offset + 1) in
+    match RegexDFA.next_state RegexDFA.initial Beg with
+    | None -> Seq.Nil
+    | Some state -> impl state 0 in
   match_dfa
 
-let any_matcher_of_nfa (nfa_eps : nfa_eps simple_matcher_group) : compiled_regex =
-  let module HatEnd = NFAEps2DFA (struct let v = nfa_eps.hat_end end) in
-  let module Hat = NFAEps2DFA (struct let v = nfa_eps.hat end) in
-  let module End = NFAEps2DFA (struct let v = nfa_eps.end_ end) in
-  let module Mid = NFAEps2DFA (struct let v = nfa_eps.mid end) in
+let rec reverse_regex = function
+  | RBeg -> REnd
+  | REnd -> RBeg
+  | RStar r -> RStar (reverse_regex r)
+  | ROpt r -> ROpt (reverse_regex r)
+  | RLit f -> RLit f
+  | ROr (r1, r2) -> ROr (reverse_regex r1, reverse_regex r2)
+  | RList rl -> RList (List.map reverse_regex @@ List.rev rl)
+  | RGroup (r, i) -> RGroup (reverse_regex r, i)
+
+let nogroup_regex_matcher (re : regex) : compiled_regex =
+  let module FrontFinder = NFAEps2DFA (struct let v = nfa_eps_of_regex (reverse_regex re) true end) in
+  let module RegexDFA = NFAEps2DFA (struct let v = nfa_eps_of_regex re false end) in
   let match_dfa (s : string) : match_info Seq.t =
-    let match_hat () =
-      let rec impl state offset longest =
-        let longest = if Hat.is_accepting state then Some offset else longest in
-        if offset >= String.length s then longest
-        else
-          match Hat.next_state state s.[offset] with
-          | None -> longest
-          | Some state' -> impl state' (offset + 1) longest in
-      let rec impl_end state offset =
-        if offset >= String.length s then
-          if HatEnd.is_accepting state then Some offset else None
-        else
-          match HatEnd.next_state state s.[offset] with
-          | None -> None
-          | Some state' -> impl_end state' (offset + 1) in
-      match impl_end HatEnd.initial 0 with
-      | None -> impl Hat.initial 0 None
-      | Some v -> Some v in
     let match_from from =
       let rec impl state offset longest =
-        let longest = if Mid.is_accepting state then Some offset else longest in
-        if offset >= String.length s then longest
+        let longest = if RegexDFA.is_accepting state then Some offset else longest in
+        if offset >= String.length s then
+          match RegexDFA.next_state state End with
+          | Some state' when RegexDFA.is_accepting state' -> Some offset
+          | _ -> longest
         else
-          match Mid.next_state state s.[offset] with
+          match RegexDFA.next_state state (Char s.[offset]) with
           | None -> longest
           | Some state' -> impl state' (offset + 1) longest in
-      let rec impl_end state offset =
-        if offset >= String.length s then
-          if End.is_accepting state then Some offset else None
-        else
-          match End.next_state state s.[offset] with
-          | None -> None
-          | Some state' -> impl_end state' (offset + 1) in
-      match impl_end End.initial from with
-      | None -> impl Mid.initial from None
-      | Some v -> Some v in
-    let rec match_rest from () =
-      if from > String.length s then Seq.Nil
-      else
+      match from with
+      | 0 ->
+        let initial = RegexDFA.next_state RegexDFA.initial Beg in
+        impl (initial |> Option.value ~default:RegexDFA.initial) 0 None
+      | _ ->
+        impl RegexDFA.initial from None in
+    let rec match_rest fronts () =
+      match fronts with
+      | [] -> Seq.Nil
+      | from :: rest ->
         match match_from from with
-        | None -> match_rest (from + 1) ()
-        | Some end_ ->
-            Seq.Cons ({ whole = (from, end_); groups = GMap.empty }, match_rest (max (from + 1) end_)) in
+        | None -> assert false
+        | Some to_ ->
+          let new_fronts = List.filter ((<) to_) rest in
+          Seq.Cons ({ whole = (from, to_); groups = GMap.empty }, match_rest new_fronts) in
     fun () ->
-      match match_hat () with
-      | None -> match_rest 1 ()
-      | Some start -> Seq.Cons ({ whole = (0, start); groups = GMap.empty }, match_rest (max 1 start)) in
+      let fronts =
+        let rec impl state offset acc =
+          let acc = if FrontFinder.is_accepting state then (offset + 1) :: acc else acc in
+          if offset < 0 then
+            match acc with
+            | 0 :: acc -> 0 :: acc
+            | _ ->
+              match FrontFinder.next_state state End with
+              | Some state' when FrontFinder.is_accepting state' -> 0 :: acc
+              | _ -> acc
+          else
+            match FrontFinder.next_state state (Char s.[offset]) with
+            | None -> acc
+            | Some state' -> impl state' (offset - 1) acc in
+        match FrontFinder.next_state FrontFinder.initial Beg with
+        | None -> []
+        | Some state -> impl state (String.length s - 1) [] in
+      match_rest fronts ()
+  in
   match_dfa
 
 let rec has_groups = function
@@ -418,11 +446,128 @@ let compile
   let reg = if case_insensitive then make_insensitive reg else reg in
   let reg = if not supports_groups then remove_groups reg else reg in
 
-  if (not supports_groups) then
-    if detection_only then
-      nfa_eps_of_regex reg true |> whole_matcher_of_nfa
-    else
-      nfa_eps_of_regex reg false |> any_matcher_of_nfa
-  else matches_simple reg
-
+  if detection_only then regex_detector reg
+  else if supports_groups then matches_simple reg
+  else nogroup_regex_matcher reg
+  
 let matches (reg : compiled_regex) (s : string) : match_info Seq.t = reg s
+
+let run reg opt s =
+  let compiled = compile opt reg in
+  matches compiled s
+  |> Seq.iter (fun { whole = start, end_; _ } -> Printf.printf "%d %d\n" start end_)
+
+let run_groups reg opt s =
+  let comp = compile opt reg in
+  matches comp s
+  |> Seq.iter (fun { whole = start, end_; groups } ->
+    Printf.printf "%d %d\n" start end_;
+    GMap.iter (fun i (start, end_) -> Printf.printf "%d: %d %d\n" i start end_) groups;
+    Printf.printf "\n")
+
+let%expect_test "simple" =
+  let reg = RList [ RLit ((=) 'a'); RLit ((=) 'b') ] in
+  let opt = { case_insensitive = false; supports_groups = false; detection_only = false } in
+  run reg opt "abc";
+  [%expect {| 0 2 |}];
+  run reg opt "ab";
+  [%expect {| 0 2 |}];
+  run reg opt "a";
+  [%expect {||}];
+  run reg opt "b";
+  [%expect {||}]
+
+let%expect_test "star" =
+  let reg = RStar (RLit ((=) 'a')) in
+  let opt = { case_insensitive = false; supports_groups = false; detection_only = false } in
+  run reg opt "aaa";
+  [%expect {| 0 3 |}];
+  run reg opt "aa";
+  [%expect {| 0 2 |}];
+  run reg opt "a";
+  [%expect {| 0 1 |}];
+  run reg opt "";
+  [%expect {| 0 0 |}];
+  run reg opt "ab";
+  [%expect {|
+    0 1
+    2 2
+    |}];
+  run reg opt "aba";
+  [%expect {|
+    0 1
+    2 3
+    |}]
+
+let%expect_test "opt" =
+  let reg = ROpt (RLit ((=) 'a')) in
+  let opt = { case_insensitive = false; supports_groups = false; detection_only = false } in
+  run reg opt "a";
+  [%expect {| 0 1 |}];
+  run reg opt "b";
+  [%expect {|
+    0 0
+    1 1
+  |}];
+  run reg opt "";
+  [%expect {| 0 0 |}]
+
+let%expect_test "or" =
+  let reg = ROr (RLit ((=) 'a'), RLit ((=) 'b')) in
+  let opt = { case_insensitive = false; supports_groups = false; detection_only = false } in
+  run reg opt "a";
+  [%expect {| 0 1 |}];
+  run reg opt "b";
+  [%expect {| 0 1 |}];
+  run reg opt "c";
+  [%expect {||}]
+
+let%expect_test "group" =
+  let reg = RGroup (RLit ((=) 'a'), 1) in
+  let opt = { case_insensitive = false; supports_groups = true; detection_only = false } in
+  run_groups reg opt "b";
+  [%expect {||}];
+  run_groups reg opt "a";
+  [%expect {|
+    0 1
+    1: 0 1
+    |}]
+  
+let%expect_test "beg" =
+  let reg = RList [ RBeg; RLit ((=) 'a'); RLit ((=) 'b') ] in
+  let opt = { case_insensitive = false; supports_groups = false; detection_only = false } in
+  run reg opt "abc";
+  [%expect {| 0 2 |}];
+  run reg opt "ab";
+  [%expect {| 0 2 |}];
+  run reg opt "_ab";
+  [%expect {||}]
+
+let%expect_test "end" =
+  let reg = RList [ RLit ((=) 'a'); RLit ((=) 'b'); REnd ] in
+  let opt = { case_insensitive = false; supports_groups = false; detection_only = false } in
+  run reg opt "abc";
+  [%expect {| |}];
+  run reg opt "ab";
+  [%expect {| 0 2 |}];
+  run reg opt "ab_";
+  [%expect {||}]
+
+let%expect_test "whole" =
+  let reg = RList [ RBeg; RLit ((=) 'a'); RLit ((=) 'b'); REnd ] in
+  let opt = { case_insensitive = false; supports_groups = false; detection_only = false } in
+  run reg opt "abc";
+  [%expect {| |}];
+  run reg opt "ab";
+  [%expect {| 0 2 |}];
+  run reg opt "_ab";
+  [%expect {||}]
+
+let%expect_test "empty" =
+  let reg = RList [ REnd; RBeg ] in
+  let opt = { case_insensitive = false; supports_groups = false; detection_only = false } in
+  run reg opt "";
+  [%expect {| 0 0 |}];
+  run reg opt "a";
+  [%expect {||}]
+  

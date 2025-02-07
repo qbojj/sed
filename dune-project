@@ -5,22 +5,13 @@
 (generate_opam_files true)
 
 (source
- (github username/reponame))
+ (github qbojj/sed))
 
-(authors "Author Name")
+(authors "Jakub Janeczko")
 
-(maintainers "Maintainer Name")
-
-(license LICENSE)
-
-(documentation https://url/to/documentation)
+(maintainers "Jakub Janeczko")
 
 (package
  (name sed)
- (synopsis "A short synopsis")
- (description "A longer description")
- (depends ocaml dune)
- (tags
-  (topics "to describe" your project)))
-
-; See the complete stanza docs at https://dune.readthedocs.io/en/stable/reference/dune-project/index.html
+ (synopsis "A simple sed clone with DFA regex matchers")
+ (depends ocaml dune cmdliner))

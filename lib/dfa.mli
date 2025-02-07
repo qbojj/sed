@@ -38,9 +38,6 @@ module type NFA_epsilon = sig
 end
 
 module NfaEpsilon2Nfa : functor (N : NFA_epsilon) ->
-  NFA
-    with module Alphabet = N.Alphabet
-     and module State = N.State
-     and module StateSet = N.StateSet
+  NFA with module Alphabet = N.Alphabet
 
 module Nfa2Dfa : functor (N : NFA) -> DFA with module Alphabet = N.Alphabet

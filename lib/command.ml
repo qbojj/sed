@@ -193,7 +193,7 @@ let parseRegex (code : pos_str) (endc : char) : (pos_str * regex) result =
     | (pos, Unescaped ')') :: _ -> err pos "unmatched )"
     | (_, Escaped c) :: rest -> impl (RLit (( = ) c) :: acc) depth block_id rest
     | (_, Unescaped '(') :: (_, Unescaped '?') :: (_, Unescaped ':') :: rest ->
-        let* rest, reg, block_id = impl [] depth block_id rest in
+        let* rest, reg, block_id = impl [] (depth + 1) block_id rest in
         impl (reg :: acc) depth block_id rest
     | (_, Unescaped '(') :: rest ->
         let idx = block_id in
@@ -242,7 +242,6 @@ let digits = "0123456789"
 let parseNumber (code : pos_str) : pos_str * int =
   let rec impl acc rest =
     match rest with
-    | [] -> (rest, acc)
     | (_, c) :: rest when String.contains digits c ->
         impl ((acc * 10) + Char.code c - Char.code '0') rest
     | _ -> (rest, acc)
@@ -267,11 +266,15 @@ let parseAddress (code : pos_str) : (pos_str * address option) result =
       return (rest, Some (Regex reg))
   | (_, c) :: _ when String.contains digits c -> (
       let rest, v = parseNumber code in
+      let rest = skipWhites rest in
       match rest with
-      | (_, '~') :: (_, c) :: _ as rest when String.contains digits c ->
+      | (pos, '~') :: rest ->
+        begin match rest with
+        | (_, c) :: _ when String.contains digits c ->
           let rest, step = parseNumber rest in
           return (rest, Some (Steps (v, step)))
-      | (pos, '~') :: _ -> err pos "invalid step"
+        | _ -> err pos "invalid step"
+        end
       | _ -> return (rest, Some (Line v)))
   | _ -> return (code, None)
 
@@ -528,3 +531,119 @@ let parseScript script =
   let* lines = splitAtNonescapedNewlines code in
   let* commands = mapM parseLineCommands @@ List.map escapeString lines in
   matchBlocks @@ List.flatten @@ commands
+
+let%test "test_parseScript_label" =
+  parseScript ":label" = Ok [Label "label"]
+
+let%test "test_parseScript_append" =
+  parseScript "a test" = Ok [Append (None, "test")]
+
+let%test "test_parseScript_insert" =
+  parseScript "i test" = Ok [Insert (None, "test")]
+
+let%test "test_parseScript_quitAutoprint" =
+  parseScript "q" = Ok [QuitAutoprint None]
+
+let%test "test_parseScript_quit" =
+  parseScript "Q" = Ok [Quit None]
+
+let%test "test_parseScript_appendFile" =
+  parseScript "r file.txt" = Ok [AppendFile (None, "file.txt")]
+
+let%test "test_parseScript_printLineNo" =
+  parseScript "=" = Ok [PrintLineNo None]
+
+let%test "test_parseScript_branch" =
+  parseScript "b label" = Ok [Branch (Always, "label")]
+
+let%test "test_parseScript_condJmp" =
+  parseScript "t label" = Ok [CondJmp (Always, "label")]
+
+let%test "test_parseScript_printEscaped" =
+  parseScript "l" = Ok [PrintEscaped Always]
+
+let%test "test_parseScript_delete" =
+  parseScript "d" = Ok [Delete Always]
+
+let%test "test_parseScript_deleteLine" =
+  parseScript "D" = Ok [DeleteLine Always]
+
+let%test "test_parseScript_copyToHold" =
+  parseScript "h" = Ok [CopyToHold Always]
+
+let%test "test_parseScript_appendToHold" =
+  parseScript "H" = Ok [AppendToHold Always]
+
+let%test "test_parseScript_copyFromHold" =
+  parseScript "g" = Ok [CopyFromHold Always]
+
+let%test "test_parseScript_appendFromHold" =
+  parseScript "G" = Ok [AppendFromHold Always]
+
+let%test "test_parseScript_next" =
+  parseScript "n" = Ok [Next Always]
+
+let%test "test_parseScript_appendNext" =
+  parseScript "N" = Ok [AppendNext Always]
+
+let%test "test_parseScript_print" =
+  parseScript "p" = Ok [Print Always]
+
+let%test "test_parseScript_printFirst" =
+  parseScript "P" = Ok [PrintFirst Always]
+
+let%test "test_parseScript_write" =
+  parseScript "w file.txt" = Ok [Write (Always, "file.txt")]
+
+let%test "test_parseScript_exchangeHold" =
+  parseScript "x" = Ok [ExchangeHold Always]
+
+let%test "test_parseScript_transliterate" =
+  parseScript "y/abc/xyz/" = Ok [Transliterate (Always, [('a', 'x'); ('b', 'y'); ('c', 'z')])]
+  
+let%test "test_parseScript_replace_empty" =
+  parseScript "s///" = Ok [Replace (Always, { src = RList []; dst = []; flags = [] })]
+
+let%test "test_parseScript_replace" =
+  match parseScript "s/a/b/" with
+  | Ok [Replace (Always, { src = RList [RLit f]; dst = _; flags = [] })] when f 'a' -> true
+  | _ -> false
+
+let%test "test_parseScript_replace_flags" =
+  match parseScript "s/// I g" with
+  | Ok [Replace (Always, { flags = [CaseInsensitive; MultiMatch]; _ })] -> true
+  | _ -> false
+
+let%test "test_parseScript_block" =
+  let script = "{
+    a test
+    b test
+  }" in
+  match parseScript script with
+  | Ok [Block (Always, [Append (None, "test"); Branch (Always, "test")])] -> true
+  | _ -> false
+
+let%test "test_address_line" =
+  parseScript "1d" = Ok [Delete (Single (Line 1, false))]
+
+let%test "test_address_last" =
+  parseScript "$d" = Ok [Delete (Single (Last, false))]
+
+let%test "test_address_steps" =
+  parseScript "1~2d" = Ok [Delete (Single (Steps (1, 2), false))]
+
+let%test "test_address_regex" =
+  match parseScript "/test/d" with
+  | Ok [Delete (Single (Regex _, false))] -> true
+  | _ -> false
+
+let%test "test_address_range" =
+  parseScript "1,2d" = Ok [Delete (Range (Line 1, Line 2, false))]
+
+let%test "test_address_range_neg" =
+  parseScript "1,2!d" = Ok [Delete (Range (Line 1, Line 2, true))]
+
+let%test "test_address_range_regex" =
+  match parseScript "/a/,/b/d" with
+  | Ok [Delete (Range (Regex _, Regex _, false))] -> true
+  | _ -> false

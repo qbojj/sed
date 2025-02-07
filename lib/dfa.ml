@@ -37,11 +37,7 @@ module type NFA_epsilon = sig
   val next_states : State.t -> token -> StateSet.t
 end
 
-module NfaEpsilon2Nfa (N : NFA_epsilon) :
-  NFA
-    with module Alphabet = N.Alphabet
-     and module State = N.State
-     and module StateSet = N.StateSet = struct
+module NfaEpsilon2Nfa (N : NFA_epsilon) = struct
   module State = N.State
   module Alphabet = N.Alphabet
   module StateSet = N.StateSet
@@ -55,13 +51,6 @@ module NfaEpsilon2Nfa (N : NFA_epsilon) :
 
       let values = Epsilon :: List.map (fun a -> Symbol a) Alphabet.values
     end
-
-    module TMap = Map.Make (struct
-      type t = State.t * Alphabet.t
-
-      let compare (a, a2) (b, b2) =
-        match State.compare a b with 0 -> Alphabet.compare a2 b2 | x -> x
-    end)
 
     let states =
       let states = ref N.initial in
@@ -192,7 +181,7 @@ module NfaEpsilon2Nfa (N : NFA_epsilon) :
     |> Option.value ~default:StateSet.empty
 end
 
-module Nfa2Dfa (N : NFA) : DFA with module Alphabet = N.Alphabet = struct
+module Nfa2Dfa (N : NFA) = struct
   module State = Int
   module Alphabet = N.Alphabet
 
@@ -201,15 +190,24 @@ module Nfa2Dfa (N : NFA) : DFA with module Alphabet = N.Alphabet = struct
     module SSet = N.StateSet
     module SSMap = Map.Make (SSet)
 
-    type state = int
-    type alphabet = Alphabet.t
+    let alphabet_sorted =
+      let v = Alphabet.values |> Array.of_list in
+      Array.sort Alphabet.compare v;
+      v
 
-    module TMap = Map.Make (struct
-      type t = state * alphabet
-
-      let compare (a, a2) (b, b2) =
-        match Int.compare a b with 0 -> Alphabet.compare a2 b2 | x -> x
-    end)
+    let index_of_alphabet a =
+      (* binsearch *)
+      let rec loop l r =
+        if l > r then None
+        else
+          let m = (l + r) / 2 in
+          let v = Array.unsafe_get alphabet_sorted m in
+          match Alphabet.compare a v with
+          | 0 -> Some m
+          | x when x < 0 -> loop l (m - 1)
+          | _ -> loop (m + 1) r
+      in
+      loop 0 (Array.length alphabet_sorted - 1)
 
     let get_after x a =
       x |> SSet.to_seq
@@ -232,11 +230,11 @@ module Nfa2Dfa (N : NFA) : DFA with module Alphabet = N.Alphabet = struct
                    let next = get_after x a in
                    if SSet.is_empty next then acc
                    else
-                   match SSMap.find_opt next !state_mapping with
-                   | Some _ -> acc
-                   | None ->
-                       register next;
-                       next :: acc)
+                     match SSMap.find_opt next !state_mapping with
+                     | Some _ -> acc
+                     | None ->
+                         register next;
+                         next :: acc)
                  xs
             |> loop
       in
@@ -248,16 +246,20 @@ module Nfa2Dfa (N : NFA) : DFA with module Alphabet = N.Alphabet = struct
 
     let initial = SSMap.find N.initial state_mapping
 
-    let transitions =
-      let transitions = ref TMap.empty in
+    let transitions : State.t option array array =
+      let no_states = SSMap.cardinal state_mapping in
+      let transitions =
+        Array.make_matrix no_states (Alphabet.values |> List.length) None
+      in
       Seq.product (SSMap.to_seq state_mapping) (List.to_seq Alphabet.values)
       |> Seq.iter (fun ((s, st), a) ->
              let next = get_after s a in
              match SSMap.find_opt next state_mapping with
-            | Some next_state ->
-                transitions := TMap.add (st, a) next_state !transitions
-            | None -> () (* empty set *));
-      !transitions
+             | Some next_state ->
+                 transitions.(st).(index_of_alphabet a |> Option.get) <-
+                   Some next_state
+             | None -> () (* empty set *));
+      transitions
 
     let accepting =
       state_mapping |> SSMap.to_seq
@@ -268,5 +270,8 @@ module Nfa2Dfa (N : NFA) : DFA with module Alphabet = N.Alphabet = struct
 
   let initial = Impl.initial
   let is_accepting s = Impl.ISet.mem s Impl.accepting
-  let next_state s a = Impl.TMap.find_opt (s, a) Impl.transitions
+
+  let next_state s a =
+    Impl.index_of_alphabet a
+    |> Fun.flip Option.bind (fun i -> Impl.transitions.(s).(i))
 end

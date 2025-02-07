@@ -143,7 +143,7 @@ let compile (commands : command list) : (compiled_program, string) Result.t =
     | Block (range, cmds) :: tl ->
         let range, neg = compile_range range in
         let* acc_inner, i_end = translate (i + 1) [] cmds in
-        let acc = { cmd = Branch (i_end - i); range; neg } :: acc in
+        let acc = { cmd = Branch (i_end - i); range; neg=not neg } :: acc in
         translate i_end (acc_inner @ acc) tl
     | Branch (range, l) :: tl ->
         let range, neg = compile_range range in
@@ -258,7 +258,7 @@ let e_cmd_is_active st =
     | Last -> ( match input () with Seq.Nil -> true | Seq.Cons _ -> false)
   in
   match cmd.range with
-  | Always -> (st, true)
+  | Always -> (st, true <> cmd.neg)
   | Single a -> (st, match_address false a <> cmd.neg)
   | Range { start; end_ } ->
       if cmd.is_active then
@@ -370,7 +370,7 @@ let run ({ autoprint; line_wrap } : config) (prog : compiled_program)
         | PrintEscaped ->
             Seq.Cons (line_wrap_and_escape line_wrap pattern, run' nst)
         | Replace info ->
-            let matches = Regex.matches info.src pattern in
+            let matches = Regex.matches info.src pattern |> Seq.memoize in
             let pattern =
               (if info.multimatch then Regex.replace_all else Regex.replace)
                 info.dst pattern matches
@@ -416,3 +416,64 @@ let run ({ autoprint; line_wrap } : config) (prog : compiled_program)
             condjmp = false;
           }
           ()
+
+let%expect_test "run-simple" =
+  let prog = compile [] |> Result.get_ok in
+  let input = List.to_seq [ "a"; "b"; "c" ] in
+  let output = run { autoprint = true; line_wrap = 0 } prog input |> List.of_seq in
+  Printf.printf "%s\n" (String.concat ";" output);
+  [%expect {| a;b;c |}]
+
+let%expect_test "run-collect" =
+  let prog = 
+    parseScript ":start; N; $!b start"
+    |> Result.get_ok
+    |> compile
+    |> Result.get_ok in
+  let input = List.to_seq [ "a"; "b"; "c" ] in
+  let output = run { autoprint = true; line_wrap = 0 } prog input |> List.of_seq in
+  Printf.printf "%s\n" (String.concat ";" output);
+  [%expect {|
+    a
+    b
+    c
+  |}]
+
+let%expect_test "run-pairwise" =
+  let prog =
+    parseScript "N; l; D"
+    |> Result.get_ok
+    |> compile
+    |> Result.get_ok in
+  let input = List.to_seq [ "a"; "b"; "c" ] in
+  let output = run { autoprint = true; line_wrap = 0 } prog input |> List.of_seq in
+  Printf.printf "%s\n" (String.concat "\n" output);
+  [%expect {|
+    a\
+    \n\
+    b$
+    b\
+    \n\
+    c$
+    c
+    |}]
+
+let%expect_test "run-range" =
+    let prog =
+      parseScript "2,4p"
+      |> Result.get_ok
+      |> compile
+      |> Result.get_ok in
+    let input = List.to_seq [ "a"; "b"; "c"; "d"; "e" ] in
+    let output = run { autoprint = false; line_wrap = 0 } prog input |> List.of_seq in
+    Printf.printf "%s\n" (String.concat "\n" output);
+    [%expect {|
+      b
+      c
+      d
+    |}]
+
+let%expect_test "bad-jump" =
+  parseScript "b start" |> Result.get_ok |> compile |> Result.get_error |> print_endline;
+  [%expect {| no label named start |}]
+

@@ -15,6 +15,11 @@ let join_result_seq (input : ('a, string) Result.t Seq.t) :
   |> Result.map (fun s -> s |> List.of_seq |> List.rev |> List.to_seq)
 
 let compile_souces source_list file_list =
+  let ( let* ) = Result.bind in
+  let* _ =
+    if List.is_empty source_list && List.is_empty file_list then
+      Error "no source or file provided"
+    else Ok () in
   let sources =
     source_list |> List.to_seq
     |> Seq.mapi (fun i s -> Ok ("inline source " ^ string_of_int i, s))
